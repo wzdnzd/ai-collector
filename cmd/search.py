@@ -25,9 +25,46 @@ import urllib.request
 import uuid
 from concurrent import futures
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum, unique
 from functools import lru_cache
 from threading import Lock
+
+
+@unique
+class TimeInterval(Enum):
+    """
+    Time interval enumeration for search refinement.
+    Each interval has a type name and corresponding days.
+    """
+
+    DAILY = ("daily", 1)
+    WEEKLY = ("weekly", 7)
+    MONTHLY = ("monthly", 30)
+    QUARTERLY = ("quarterly", 90)
+    YEARLY = ("yearly", 365)
+
+    def __init__(self, category: str, interval: int):
+        self.category = category
+        self.interval = interval
+
+    def __str__(self) -> str:
+        return f"{self.category} ({self.interval} days)"
+
+    @classmethod
+    def from_days(cls, days: int) -> "TimeInterval":
+        """Get the most appropriate TimeInterval for given days."""
+        if days <= 1:
+            return cls.DAILY
+        elif days <= 7:
+            return cls.WEEKLY
+        elif days <= 30:
+            return cls.MONTHLY
+        elif days <= 90:
+            return cls.QUARTERLY
+        else:
+            return cls.YEARLY
+
 
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
@@ -61,6 +98,166 @@ FILE_LOCK = Lock()
 
 
 PATH = os.path.abspath(os.path.dirname(__file__))
+
+
+# Language popularity tiers for LLM/API key domain with time step multipliers
+LANGUAGE_TIERS = {
+    # Tier 1: Extremely popular in LLM/API domain (multiplier: 1 - finest granularity)
+    "tier1": {
+        "languages": ["python", "javascript", "typescript"],
+        "multiplier": 1,
+        "description": "Dominant in LLM/API development",
+    },
+    # Tier 2: Very popular (multiplier: 4 - finer granularity)
+    "tier2": {
+        "languages": ["json", "yaml", "markdown", "text", "ini", "java", "go"],
+        "multiplier": 4,
+        "description": "Very popular in enterprise/web development",
+    },
+    # Tier 3: Very popular (multiplier: 8 - finer granularity)
+    "tier3": {
+        "languages": ["csharp", "rust", "shell", "c", "cpp"],
+        "multiplier": 8,
+        "description": "Common in enterprise/web development",
+    },
+    # Tier 4: Moderately popular (multiplier: 12 - finer granularity)
+    "tier4": {
+        "languages": [
+            "scala",
+            "dart",
+            "r",
+            "php",
+            "lua",
+            "perl",
+            "sql",
+            "xml",
+            "toml",
+            "dockerfile",
+            "bash",
+            "ruby",
+            "kotlin",
+            "swift",
+            "html",
+            "bat",
+            "powershell",
+        ],
+        "multiplier": 12,
+        "description": "Specialized domains",
+    },
+    # Tier 5: Less common (multiplier: 16 - much coarser granularity)
+    "tier5": {
+        "languages": [
+            "coffeescript",
+            "handlebars",
+            "clojure",
+            "fsharp",
+            "scheme",
+            "mysql",
+            "pgsql",
+            "graphql",
+            "redis",
+            "apex",
+            "pascal",
+            "tcl",
+            "vb",
+        ],
+        "multiplier": 16,
+        "description": "Niche/specialized languages",
+    },
+}
+
+# Create language to tier mapping for quick lookup
+LANGUAGE_TO_TIER = {}
+for name, data in LANGUAGE_TIERS.items():
+    for lang in data["languages"]:
+        LANGUAGE_TO_TIER[lang] = name
+
+# Flatten all languages for backward compatibility
+POPULAR_LANGUAGES = []
+for data in LANGUAGE_TIERS.values():
+    POPULAR_LANGUAGES.extend(data["languages"])
+
+# Language to extension mapping to avoid invalid combinations
+LANGUAGE_EXTENSIONS = {
+    "python": ["py", "pyw", "pyi"],
+    "javascript": ["js", "mjs", "jsx"],
+    "typescript": ["ts", "tsx"],
+    "java": ["java"],
+    "cpp": ["cpp", "cc", "cxx", "c++", "hpp", "h++"],
+    "c": ["c", "h"],
+    "csharp": ["cs"],
+    "go": ["go"],
+    "rust": ["rs"],
+    "php": ["php", "phtml"],
+    "ruby": ["rb", "rake"],
+    "swift": ["swift"],
+    "kotlin": ["kt", "kts"],
+    "scala": ["scala", "sc"],
+    "dart": ["dart"],
+    "r": ["r", "R"],
+    "lua": ["lua"],
+    "perl": ["pl", "pm"],
+    "html": ["html", "htm"],
+    "coffeescript": ["coffee"],
+    "handlebars": ["hbs", "handlebars"],
+    "clojure": ["clj", "cljs", "cljc"],
+    "fsharp": ["fs", "fsi", "fsx"],
+    "scheme": ["scm", "ss"],
+    "sql": ["sql"],
+    "mysql": ["sql"],
+    "pgsql": ["sql"],
+    "graphql": ["graphql", "gql"],
+    "redis": ["redis"],
+    "markdown": ["md", "markdown"],
+    "json": ["json"],
+    "yaml": ["yaml", "yml"],
+    "xml": ["xml"],
+    "ini": ["ini", "cfg", "conf"],
+    "dockerfile": ["dockerfile", "Dockerfile"],
+    "shell": ["sh", "bash", "zsh", "fish"],
+    "powershell": ["ps1", "psm1"],
+    "bat": ["bat", "cmd"],
+    "plaintext": ["txt", "text"],
+    "apex": ["cls", "trigger"],
+    "pascal": ["pas", "pp"],
+    "tcl": ["tcl"],
+    "vb": ["vb", "vbs"],
+    "toml": ["toml"],
+}
+
+
+# File size ranges for refinement
+SIZE_RANGES = [
+    "<1000",  # < 1KB
+    "1000..5000",  # 1-5KB
+    "5000..20000",  # 5-20KB
+    "20000..100000",  # 20-100KB
+    ">100000",  # > 100KB
+]
+
+
+# Maximum pages for API search
+API_MAX_PAGES = 10
+
+
+# Maximum pages for web search
+WEB_MAX_PAGES = 5
+
+
+# Results per page
+RESULTS_PER_PAGE = 100
+
+
+# REST API limit
+API_LIMIT = API_MAX_PAGES * RESULTS_PER_PAGE
+
+
+# Web search limit (5 pages * 20 results)
+WEB_LIMIT = WEB_MAX_PAGES * 20
+
+
+# Start date for search
+SEARCH_START_DATE = "2022-10-01"
 
 
 logging.basicConfig(
@@ -1084,6 +1281,537 @@ def get_total_num(query: str, token: str) -> int:
         return 0
 
 
+def estimate_web_total(query: str, session: str) -> int:
+    """
+    Get total count for web search using GitHub's blackbird_count API.
+    Performs a single search and then queries the count API.
+    """
+    if isblank(session) or isblank(query):
+        return 0
+
+    try:
+        # Perform initial search to trigger count calculation and get content for fallback
+        content = search_github_web(query=query, session=session, page=1)
+        if isblank(content):
+            logging.warning(f"[Search] initial search failed for query: {query}")
+            return 150
+
+        # Check if query is already encoded to avoid double encoding
+        if "%" in query and any(c in query for c in ["%2F", "%5B", "%5D", "%7B", "%7D"]):
+            encoded = query.replace(" ", "+")
+        else:
+            encoded = urllib.parse.quote_plus(query)
+
+        # Query the blackbird_count API
+        url = f"https://github.com/search/blackbird_count?saved_searches=^&q={encoded}"
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": f"https://github.com/search?q={encoded}^&type=code",
+            "X-Requested-With": "XMLHttpRequest",
+            "Cookie": f"user_session={session}",
+        }
+
+        # Random delay to ensure count is calculated
+        time.sleep(random.random() * 2)
+
+        response = http_get(url=url, headers=headers, interval=1)
+        if response:
+            data = json.loads(response)
+            if not data.get("failed", True):
+                count = data.get("count", 0)
+                mode = data.get("mode", "unknown")
+                logging.info(f"[Search] got {count} results (mode: {mode}) for query: {query}")
+
+                # Return count if valid, otherwise try page extraction
+                return count if count > 0 else extract_count_from_page(content, query)
+
+        # Fallback: extract count from search page
+        return extract_count_from_page(content, query)
+
+    except Exception as e:
+        logging.error(f"[Search] estimation failed for query: {query}, error: {e}")
+        return 150  # Conservative estimate
+
+
+def extract_count_from_page(content: str, query: str) -> int:
+    """
+    Extract result count from GitHub search page content.
+    """
+    if isblank(content):
+        return 150
+
+    try:
+        # Try different patterns GitHub uses to show result counts
+        patterns = [
+            r"We\'ve found ([\d,]+) code results",
+            r"([\d,]+) code results",
+            r'data-total-count="([\d,]+)"',
+            r'"total_count":(\d+)',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, content, re.I)
+            if match:
+                text = match.group(1).replace(",", "")
+                count = int(text)
+                logging.info(f"[Search] extracted {count} results from page for query: {query}")
+                return count
+
+        # If no count found, use conservative estimate
+        logging.warning(f"[Search] could not extract count from page for query: {query}")
+        return 150
+
+    except Exception as e:
+        logging.error(f"[Search] failed to extract count from page: {e}")
+        return 150
+
+
+def execute_refined_search(
+    session: str,
+    query: str,
+    with_api: bool,
+    total: int,
+    thread_num: int = None,
+    fast: bool = False,
+    precise: bool = False,
+) -> list[str]:
+    """
+    Execute refined search using multiple query conditions to bypass GitHub limits.
+    Requires total count to be provided to avoid duplicate estimation calls.
+
+    Args:
+        precise: If True, calculate exact pages for each query; if False, use fuzzy estimation
+    """
+    # Generate refined queries
+    if with_api:
+        queries = generate_api_refined_queries(query, total)
+        logging.info(f"[Search] generated {len(queries)} API queries")
+    else:
+        start = datetime.strptime(SEARCH_START_DATE, "%Y-%m-%d")
+        end = datetime.now()
+
+        queries = generate_web_refined_queries(start, end, query, total, max_queries=-1)
+        logging.info(f"[Search] generated {len(queries)} web queries")
+
+    if not queries:
+        logging.warning(f"[Search] no refined queries generated for: {query}")
+        return []
+
+    # Calculate pages needed for each query
+    records = calculate_pages_for_queries(queries, total, with_api, session, precise)
+
+    # Execute queries
+    links = set()
+
+    if fast:
+        # Concurrent execution with dynamic page calculation
+        tasks = list()
+        for q in queries:
+            encoded = urllib.parse.quote_plus(q)
+            pages = records.get(q, 1)  # Get calculated pages for this query
+            for page in range(1, pages + 1):
+                tasks.append([encoded, session, page, with_api, RESULTS_PER_PAGE])
+
+        logging.info(f"[Search] executing {len(tasks)} concurrent tasks")
+        results = multi_thread_run(func=search_code, tasks=tasks, thread_num=thread_num)
+
+        for result in results:
+            if result:
+                links.update(result)
+    else:
+        # Sequential execution with dynamic page calculation
+        for i, q in enumerate(queries):
+            pages = records.get(q, 1)  # Get calculated pages for this query
+            logging.info(f"[Search] executing query {i+1}/{len(queries)} ({pages} pages): {q}")
+
+            encoded = urllib.parse.quote_plus(q)
+            for page in range(1, pages + 1):
+                result = search_code(
+                    query=encoded,
+                    session=session,
+                    page=page,
+                    with_api=with_api,
+                    peer_page=RESULTS_PER_PAGE,
+                )
+                if result:
+                    links.update(result)
+
+                # Rate limiting
+                if with_api and page < pages:
+                    time.sleep(random.randint(6, 12))
+
+            # Rate limiting between queries
+            if i < len(queries) - 1:
+                time.sleep(random.randint(2, 5))
+
+    result = list(links)
+    logging.info(f"[Search] refined search completed, found {len(result)} unique links")
+    return result
+
+
+def generate_api_refined_queries(query: str, total: int = 1000) -> list[str]:
+    """
+    Generate refined queries for REST API search.
+    Uses adaptive refinement levels based on expected result count to avoid query overlap.
+    """
+    queries = set()  # Use set for automatic deduplication
+    base = query.strip()
+
+    # Calculate weighted number of languages
+    num_languages = get_language_weighted_num()
+
+    # Determine refinement level based on total results
+    if total <= API_LIMIT:
+        # Level 0: Base query only
+        level = "base-only"
+        queries.add(base)
+
+    elif total <= API_LIMIT * num_languages:
+        # Level 1: Language-based refinement only
+        level = "language"
+        for lang in POPULAR_LANGUAGES:
+            queries.add(f"{base} language:{lang}")
+
+    elif total <= API_LIMIT * num_languages * len(SIZE_RANGES):
+        # Level 2: Language + Size refinement
+        level = "language+size"
+        for lang in POPULAR_LANGUAGES:
+            for size in SIZE_RANGES:
+                queries.add(f"{base} language:{lang} size:{size}")
+
+    else:
+        # Level 3: Maximum refinement (Language + Size + Extension)
+        level = "language+size+extension"
+        for lang in POPULAR_LANGUAGES:
+            if lang in LANGUAGE_EXTENSIONS:
+                for size in SIZE_RANGES:
+                    for ext in LANGUAGE_EXTENSIONS[lang]:
+                        queries.add(f"{base} language:{lang} size:{size} extension:{ext}")
+            else:
+                # For languages without extensions, use language+size
+                for size in SIZE_RANGES:
+                    queries.add(f"{base} language:{lang} size:{size}")
+
+    logging.info(f"[API] using {level} refinement for {len(queries)} queries")
+    return list(queries)
+
+
+def generate_web_refined_queries(
+    start: datetime,
+    end: datetime,
+    query: str,
+    total: int,
+    max_queries: int = -1,
+) -> list[str]:
+    """
+    Generate refined queries for web search using adaptive granularity.
+    Uses progressive refinement: time -> time+language -> time+language+stars
+    Avoids query overlap by using only the finest granularity needed.
+    """
+    base = trim(query)
+    if (
+        not base
+        or not start
+        or not end
+        or not isinstance(start, datetime)
+        or not isinstance(end, datetime)
+        or start >= end
+    ):
+        logging.error(f"[Search] invalid parameters for web query generation: {start}, {end}, {query}")
+        return []
+
+    # Use set for automatic deduplication
+    queries = set()
+
+    logging.info(f"[Search] generating refined queries for {total} results with limit: {max_queries}")
+
+    # Calculate total durations
+    durations = (end - start).days
+
+    # Get adaptive time step and whether to split by language
+    step, flag = get_adaptive_time_step(total, durations)
+
+    # Define stars for refinement
+    stars = ["0..10", "11..100", "101..1000", ">1000"]
+
+    # Generate queries based on flag value
+    if flag != 1 and flag != 2:
+        # No language splitting needed - use time-only queries
+        level = "time-only"
+        if flag == 0:
+            logging.info(f"[Search] flag=0: using time-only queries")
+        else:
+            logging.warning(f"[Search] unexpected flag value: {flag}, falling back to time-only")
+
+        serials = get_time_ranges(start, end, step)
+        for left, right in serials:
+            queries.add(f"{base} created:{left}..{right}")
+    else:
+        # Language splitting needed
+        if flag == 1:
+            level = "time+language"
+            logging.info(f"[Search] flag=1: using time+language queries")
+        else:
+            level = "time+language+stars"
+            logging.info(f"[Search] flag=2: using time+language+stars queries")
+
+        for lang in POPULAR_LANGUAGES:
+            # Get multiplier for this language
+            multiplier = get_language_multiplier(lang)
+
+            # Generate time ranges for this language
+            serials = get_time_ranges(start, end, step, multiplier)
+
+            for left, right in serials:
+                prefix = f"{base} created:{left}..{right} language:{lang}"
+
+                if flag == 1:
+                    # Just add the base query for flag=1
+                    queries.add(prefix)
+                else:
+                    # Add stars refinement for flag=2
+                    for star in stars:
+                        queries.add(f"{prefix} stars:{star}")
+
+    logging.info(f"[Search] using {level} queries for {len(queries)} total")
+
+    # Apply query limit if specified
+    result = list(queries)
+    if max_queries > 0 and len(result) > max_queries:
+        result = result[:max_queries]
+        logging.info(f"[Search] limited to {len(result)} with queries max: {max_queries}")
+
+    return result
+
+
+def get_language_multiplier(lang: str) -> int:
+    """Get the multiplier for a given language based on its tier."""
+    tier = LANGUAGE_TO_TIER.get(trim(lang).lower(), "tier5")
+    return LANGUAGE_TIERS[tier].get("multiplier", 1)
+
+
+def calculate_time_slices(start: datetime, end: datetime, step: int) -> tuple[int, int]:
+    """
+    Calculate time slices between start and end dates.
+
+    Args:
+        start: Start date as datetime object
+        end: End date as datetime object
+        step: Time interval step in days
+
+    Returns:
+        Tuple of (count, span) where:
+        - count: Number of time slices
+        - span: Span per slice in days
+
+    Raises:
+        ValueError: If parameters are invalid
+    """
+    # Validate parameters
+    if not start or not end:
+        raise ValueError("[Search] start and end dates cannot be None")
+
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        raise ValueError("[Search] start and end must be datetime objects")
+
+    if step <= 0:
+        raise ValueError("[Search] step must be greater than 0")
+
+    if start >= end:
+        raise ValueError("[Search] start date must be before end date")
+
+    # Calculate total days between dates
+    total = (end - start).days
+
+    # Calculate slice count (total / step, rounded up)
+    count = math.ceil(total / step)
+
+    # Calculate average span per slice (total / count, rounded up)
+    span = math.ceil(total / count)
+
+    return count, span
+
+
+def get_time_ranges(
+    start: datetime,
+    end: datetime,
+    step: int,
+    multiplier: int = 1,
+) -> list[tuple[str, str]]:
+    """
+    Generate time ranges between start and end dates with specified step.
+
+    Args:
+        start: Start date as datetime object
+        end: End date as datetime object
+        step: Time interval step in days
+        multiplier: Multiplier for step size, default is 1
+
+    Returns:
+        List of (start_date, end_date) tuples as strings
+
+    Raises:
+        ValueError: If parameters are invalid
+    """
+    if not start or not end:
+        raise ValueError("[Search] start and end dates cannot be None")
+
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        raise ValueError("[Search] start and end must be datetime objects")
+
+    if step <= 0:
+        raise ValueError("[Search] step must be greater than 0")
+
+    if start >= end:
+        raise ValueError("[Search] start date must be before end date")
+
+    # Calculate diff for this range
+    diff = step * multiplier
+
+    current, serials = start, []
+    while current < end:
+        # For the last range, ensure it ends exactly on the end date
+        if current + timedelta(days=diff) >= end:
+            # Last range ends exactly on end date
+            tail = end
+        else:
+            # Normal range
+            tail = current + timedelta(days=diff - 1)
+
+        # Format dates
+        left = current.strftime("%Y-%m-%d")
+        right = tail.strftime("%Y-%m-%d")
+        serials.append((left, right))
+
+        # Move to next range
+        current += timedelta(days=diff)
+
+    return serials
+
+
+def get_language_weighted_num() -> int:
+    """
+    Calculate weighted sum of programming languages across all tiers.
+
+    Formula: sum(language_count * (1 / multiplier)) for each tier, then ceil.
+
+    Returns:
+        int: Ceiling of the weighted sum
+    """
+    total = 0.0
+
+    # 1. Traverse LANGUAGE_TIERS to get language count and multiplier for each tier
+    for tier in LANGUAGE_TIERS.values():
+        count = len(tier.get("languages", []))
+        multiplier = tier.get("multiplier", 1.0)
+
+        # 2. Accumulate: language_count * (1 / multiplier)
+        total += count * (1.0 / multiplier)
+
+    # 3. Round up and return
+    return math.ceil(total)
+
+
+def get_adaptive_time_step(total: int, durations: int) -> tuple[int, int]:
+    """
+    Determine adaptive time step based on data volume.
+
+    Args:
+        total: Total number of expected results
+        durations: Total duration in days
+
+    Returns:
+        int: Adaptive time step in days
+        int: 0 means no language splitting needed, 1 means language splitting needed, 2 means continue with stars splitting after language splitting
+    """
+    if total <= 0 or durations <= 0:
+        raise ValueError("[Search] total and durations must be greater than 0")
+
+    # Minimum partitions needed without hitting query limit
+    partitions = math.ceil(total / WEB_LIMIT)
+
+    # Minimum time step is 1 day, so we can have at most 'durations' partitions
+    # If partitions > durations, we must split by language
+    step, flag = 1, 0 if partitions <= durations else 1
+
+    if flag == 1:
+        # Calculate weighted number of programming languages
+        num_languages = get_language_weighted_num()
+
+        # Calculate step size, durations * num_languages represents total partitions when splitting by both time and language
+        average = durations * num_languages / partitions
+        if average < 1:
+            flag = 2
+
+        step = max(1, math.ceil(average))
+    else:
+        step = max(1, math.floor(durations / partitions))
+
+    return step, flag
+
+
+def calculate_pages_for_queries(
+    queries: list[str], total: int, with_api: bool, session: str = "", precise: bool = False
+) -> dict[str, int]:
+    """
+    Calculate the number of pages needed for each refined query.
+
+    Args:
+        queries: List of refined queries
+        total: Total estimated results for original query
+        with_api: Whether using API or web search
+        session: Session for web search (required if precise=True and with_api=False)
+        precise: If True, get exact count for each query; if False, use estimation
+
+    Returns:
+        Dictionary mapping query to number of pages needed
+    """
+    max_pages = API_MAX_PAGES if with_api else WEB_MAX_PAGES
+    pages = dict()
+
+    if precise:
+        # Precise mode: get exact count for each query
+        logging.info(f"[Search] calculating precise page counts for {len(queries)} queries")
+
+        for query in queries:
+            if with_api:
+                # For API, use get_total_num to get exact count
+                count = get_total_num(query)
+                if count == 0:
+                    # Fallback to fuzzy estimation if API returns 0
+                    count = total // len(queries)
+            else:
+                # For web search, use existing estimation function
+                count = estimate_web_total(query, session)
+                if count == 0:
+                    # Fallback to fuzzy estimation if web estimation returns 0
+                    count = total // len(queries)
+
+            # Calculate pages needed
+            needed = min(math.ceil(count / RESULTS_PER_PAGE), max_pages)
+            pages[query] = max(1, needed)
+
+    else:
+        # Fuzzy mode: estimate based on total divided by number of queries
+        logging.info(f"[Search] using fuzzy estimation for {len(queries)} queries")
+
+        average = total / len(queries) if queries else total
+        needed = max(1, min(math.ceil(average / RESULTS_PER_PAGE), max_pages))
+
+        # Apply same page count to all queries
+        for query in queries:
+            pages[query] = needed
+
+    # Log summary
+    total_pages = sum(pages.values())
+    avg_pages = total_pages / len(queries) if queries else 0
+    logging.info(f"[Search] calculated pages: total={total_pages}, average={avg_pages:.1f}, max={max_pages}")
+
+    return pages
+
+
 def search_code(query: str, session: str, page: int, with_api: bool, peer_page: int) -> list[str]:
     keyword = trim(query)
     if not keyword:
@@ -1123,29 +1851,42 @@ def batch_search_code(
         logging.error(f"[Search] skip to search due to query or session is empty")
         return []
 
-    keyword = urllib.parse.quote(query, safe="")
-    peer_page, count = 100, 5
+    keyword = urllib.parse.quote_plus(query)
 
     if with_api:
         total = get_total_num(query=keyword, token=session)
         logging.info(f"[Search] found {total} items with query: {query}")
 
-        if total > 0:
-            count = math.ceil(total / peer_page)
+        # Check if refinement is needed for API search
+        if total > API_LIMIT:
+            logging.info(f"[Search] total count {total} exceeds API limit {API_LIMIT}, using refined queries")
+            return execute_refined_search(session, query, with_api=True, total=total, thread_num=thread_num, fast=fast)
 
-    # see: https://stackoverflow.com/questions/37602893/github-search-limit-results
-    # the search api will return up to 1000 results per query (including pagination, peer_page: 100)
-    # and web search is limited to 5 pages
-    # so maxmum page num is 10
-    page_num = min(count if page_num < 0 or page_num > count else page_num, 10)
+        # Use original logic for API search within limits
+        count = math.ceil(total / RESULTS_PER_PAGE) if total > 0 else API_MAX_PAGES
+    else:
+        # For web search, estimate total count
+        total = estimate_web_total(query=keyword, session=session)
+        logging.info(f"[Search] estimated {total} items for web query: {query}")
+
+        # Check if refinement is needed for web search
+        if total > WEB_LIMIT:
+            logging.info(f"[Search] estimated count {total} exceeds web limit {WEB_LIMIT}, using refined queries")
+            return execute_refined_search(session, query, with_api=False, total=total, thread_num=thread_num, fast=fast)
+
+        # Use original logic for web search within limits
+        count = WEB_MAX_PAGES
+
+    # Original pagination logic for queries within limits
+    page_num = min(count if page_num < 0 or page_num > count else page_num, API_MAX_PAGES)
     if page_num <= 0:
         logging.error(f"[Search] page number must be greater than 0")
         return []
 
     links = list()
     if fast:
-        # concurrent requests are easy to fail but faster
-        queries = [[keyword, session, x, with_api, peer_page] for x in range(1, page_num + 1)]
+        # Concurrent requests are easy to fail but faster
+        queries = [[keyword, session, x, with_api, RESULTS_PER_PAGE] for x in range(1, page_num + 1)]
         candidates = multi_thread_run(
             func=search_code,
             tasks=queries,
@@ -1153,17 +1894,24 @@ def batch_search_code(
         )
         links = list(set(itertools.chain.from_iterable(candidates)))
     else:
-        # sequential requests are more stable but slower
+        # Sequential requests are more stable but slower
         potentials = set()
         for i in range(1, page_num + 1):
-            urls = search_code(query=keyword, session=session, page=i, with_api=with_api, peer_page=peer_page)
+            urls = search_code(
+                query=keyword,
+                session=session,
+                page=i,
+                with_api=with_api,
+                peer_page=RESULTS_PER_PAGE,
+            )
             potentials.update([x for x in urls if x])
 
-            # avoid github api rate limit: 10RPM
+            # Avoid github api rate limit: 10RPM
             if i < page_num:
                 time.sleep(random.randint(6, 12))
 
         links = list(potentials)
+
     if not links:
         logging.warning(f"[Search] cannot found any link with query: {query}")
 
