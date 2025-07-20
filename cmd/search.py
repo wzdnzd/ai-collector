@@ -1227,7 +1227,44 @@ def search_github_web(query: str, session: str, page: int) -> str:
     return content
 
 
-def search_github_api(query: str, token: str, page: int = 1, peer_page: int = 100) -> list[str]:
+def search_web_with_count(query: str, session: str, page: int = 1) -> tuple[list[str], int]:
+    """
+    Search GitHub web and return both results and total count.
+    Returns: (results_list, total_count)
+    """
+    if page <= 0 or isblank(session) or isblank(query):
+        return [], 0
+
+    # Get results from web search
+    content = search_github_web(query, session, page)
+    if isblank(content):
+        return [], 0
+
+    # Extract links from content
+    try:
+        regex = r'href="(/[^\s"]+/blob/(?:[^"]+)?)#L\d+"'
+        groups = re.findall(regex, content, flags=re.I)
+        uris = list(set(groups)) if groups else []
+        links = set()
+
+        for uri in uris:
+            links.add(f"https://github.com{uri}")
+
+        results = list(links)
+    except:
+        results = []
+
+    # Get total count (only for first page to avoid redundant calls)
+    if page == 1:
+        total = estimate_web_total(query, session, content)
+    else:
+        # For non-first pages, we don't need total count, use 0 as placeholder
+        total = 0
+
+    return results, total
+
+
+def search_github_api(query: str, token: str, page: int = 1, peer_page: int = RESULTS_PER_PAGE) -> list[str]:
     """rate limit: 10RPM"""
     if isblank(token) or isblank(query):
         return []
@@ -1261,6 +1298,159 @@ def search_github_api(query: str, token: str, page: int = 1, peer_page: int = 10
         return []
 
 
+def search_api_with_count(
+    query: str, token: str, page: int = 1, limit: int = RESULTS_PER_PAGE
+) -> tuple[list[str], int]:
+    """
+    Search GitHub API and return both results and total count.
+    Returns: (results_list, total_count)
+    """
+    if isblank(token) or isblank(query):
+        return [], 0
+
+    limit, page = min(max(limit, 1), 100), max(1, page)
+    url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page={limit}&page={page}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    content = http_get(url=url, headers=headers, interval=2, timeout=30)
+    if isblank(content):
+        return [], 0
+
+    try:
+        data = json.loads(content)
+        items = data.get("items", [])
+        total = data.get("total_count", 0)
+
+        links = set()
+        for item in items:
+            if not item or type(item) != dict:
+                continue
+
+            link = item.get("html_url", "")
+            if isblank(link):
+                continue
+            links.add(link)
+
+        return list(links), total
+    except:
+        return [], 0
+
+
+def search_with_count(query: str, session: str, page: int, with_api: bool, limit: int) -> tuple[list[str], int]:
+    """
+    Unified search interface that returns both results and total count.
+    Returns: (results_list, total_count)
+    """
+    if with_api:
+        return search_api_with_count(query, session, page, limit)
+    else:
+        return search_web_with_count(query, session, page)
+
+
+def execute_tasks(tasks: list, with_api: bool, fast: bool, thread_num: int, first: bool) -> list:
+    """
+    Execute search tasks with concurrent or sequential strategy.
+
+    Args:
+        tasks: List of task parameters
+        with_api: Whether using API search
+        fast: Whether to use concurrent execution
+        thread_num: Number of threads for concurrent execution
+        first: True for first-page tasks, False for remaining-page tasks
+
+    Returns:
+        List of results from executed tasks
+    """
+    task_type = "first-page" if first else "remaining-page"
+
+    if fast and thread_num:
+        # Concurrent execution
+        logging.info(f"[Search] executing {len(tasks)} {task_type} tasks concurrently")
+        if first:
+            return multi_thread_run(func=lambda task: search_with_count(*task), tasks=tasks, thread_num=thread_num)
+        else:
+            return multi_thread_run(func=search_code, tasks=tasks, thread_num=thread_num)
+    else:
+        # Sequential execution
+        results = list()
+        for i, task in enumerate(tasks):
+            encoded, session, page, with_api, limit = task
+            query = urllib.parse.unquote_plus(encoded)
+
+            logging.info(f"[Search] executing {task_type}, progress: {i+1}/{len(tasks)}, query: {query}, page: {page}")
+
+            if first:
+                result = search_with_count(encoded, session, page, with_api, limit)
+            else:
+                result = search_code(encoded, session, page, with_api, limit)
+
+            results.append(result)
+
+            # Rate limiting
+            if i < len(tasks) - 1:
+                if with_api:
+                    time.sleep(random.randint(6, 12))
+                else:
+                    time.sleep(random.randint(2, 5))
+
+        return results
+
+
+def progressive_search(
+    queries: list[str], session: str, with_api: bool, thread_num: int = None, fast: bool = False
+) -> list[str]:
+    """
+    Progressive search: query first page to get results and total count,
+    then decide whether to continue with remaining pages.
+    """
+    results, remaining = set(), list()
+
+    logging.info(f"[Search] starting progressive search for {len(queries)} queries")
+
+    # Step 1: Query first page of all queries
+    tasks = list()
+    for query in queries:
+        encoded = urllib.parse.quote_plus(query)
+        tasks.append([encoded, session, 1, with_api, RESULTS_PER_PAGE])
+
+    first_data = execute_tasks(tasks, with_api, fast, thread_num, True)
+
+    # Step 2: Analyze results and determine remaining pages
+    count = 0
+    for i, (data, total) in enumerate(first_data):
+        if data:
+            results.update(data)
+
+        if total > RESULTS_PER_PAGE:
+            # Calculate remaining pages
+            pages = math.ceil(total / RESULTS_PER_PAGE)
+            encoded = urllib.parse.quote_plus(queries[i])
+
+            for page in range(2, pages + 1):
+                remaining.append([encoded, session, page, with_api, RESULTS_PER_PAGE])
+
+            count += 1
+            logging.info(f"[Search] query '{queries[i]}' has {total} results, {pages} pages")
+
+    logging.info(f"[Search] found {count} multi-page queries, {len(remaining)} remaining tasks")
+
+    # Step 3: Execute remaining pages
+    if remaining:
+        more_data = execute_tasks(remaining, with_api, fast, thread_num, False)
+
+        for result in more_data:
+            if result:
+                results.update(result)
+
+    final = list(results)
+    logging.info(f"[Search] progressive search completed, found {len(final)} unique links")
+    return final
+
+
 def get_total_num(query: str, token: str) -> int:
     if isblank(token) or isblank(query):
         return 0
@@ -1281,7 +1471,7 @@ def get_total_num(query: str, token: str) -> int:
         return 0
 
 
-def estimate_web_total(query: str, session: str) -> int:
+def estimate_web_total(query: str, session: str, content: str = None) -> int:
     """
     Get total count for web search using GitHub's blackbird_count API.
     Performs a single search and then queries the count API.
@@ -1290,11 +1480,21 @@ def estimate_web_total(query: str, session: str) -> int:
         return 0
 
     try:
-        # Perform initial search to trigger count calculation and get content for fallback
-        content = search_github_web(query=query, session=session, page=1)
-        if isblank(content):
-            logging.warning(f"[Search] initial search failed for query: {query}")
-            return 150
+        message = urllib.parse.unquote_plus(query)
+    except:
+        message = query
+
+    try:
+        if content is None:
+            # Perform initial search to trigger count calculation and get content for fallback
+            content = search_github_web(query=query, session=session, page=1)
+
+        content = trim(content)
+        if not content:
+            logging.warning(f"[Search] initial search failed for query: {message}, using conservative estimate")
+
+            # Conservative estimate
+            return WEB_LIMIT
 
         # Check if query is already encoded to avoid double encoding
         if "%" in query and any(c in query for c in ["%2F", "%5B", "%5D", "%7B", "%7D"]):
@@ -1322,7 +1522,7 @@ def estimate_web_total(query: str, session: str) -> int:
             if not data.get("failed", True):
                 count = data.get("count", 0)
                 mode = data.get("mode", "unknown")
-                logging.info(f"[Search] got {count} results (mode: {mode}) for query: {query}")
+                logging.info(f"[Search] got {count} results, mode: {mode}, query: {message}")
 
                 # Return count if valid, otherwise try page extraction
                 return count if count > 0 else extract_count_from_page(content, query)
@@ -1331,8 +1531,10 @@ def estimate_web_total(query: str, session: str) -> int:
         return extract_count_from_page(content, query)
 
     except Exception as e:
-        logging.error(f"[Search] estimation failed for query: {query}, error: {e}")
-        return 150  # Conservative estimate
+        logging.error(f"[Search] estimation failed for query: {message}, error: {e}, using conservative estimate")
+
+        # Conservative estimate
+        return WEB_LIMIT
 
 
 def extract_count_from_page(content: str, query: str) -> int:
@@ -1340,7 +1542,7 @@ def extract_count_from_page(content: str, query: str) -> int:
     Extract result count from GitHub search page content.
     """
     if isblank(content):
-        return 150
+        return WEB_LIMIT
 
     try:
         # Try different patterns GitHub uses to show result counts
@@ -1361,28 +1563,24 @@ def extract_count_from_page(content: str, query: str) -> int:
 
         # If no count found, use conservative estimate
         logging.warning(f"[Search] could not extract count from page for query: {query}")
-        return 150
+        return WEB_LIMIT
 
     except Exception as e:
         logging.error(f"[Search] failed to extract count from page: {e}")
-        return 150
+        return WEB_LIMIT
 
 
-def execute_refined_search(
+def refined_search(
     session: str,
     query: str,
     with_api: bool,
     total: int,
     thread_num: int = None,
     fast: bool = False,
-    precise: bool = False,
 ) -> list[str]:
     """
-    Execute refined search using multiple query conditions to bypass GitHub limits.
-    Requires total count to be provided to avoid duplicate estimation calls.
-
-    Args:
-        precise: If True, calculate exact pages for each query; if False, use fuzzy estimation
+    Execute refined search using progressive search strategy.
+    Uses progressive search to reduce redundant queries.
     """
     # Generate refined queries
     if with_api:
@@ -1396,56 +1594,8 @@ def execute_refined_search(
         logging.warning(f"[Search] no refined queries generated for: {query}")
         return []
 
-    # Calculate pages needed for each query
-    records = calculate_pages_for_queries(queries, total, with_api, session, precise)
-
-    # Execute queries
-    links = set()
-
-    if fast:
-        # Concurrent execution with dynamic page calculation
-        tasks = list()
-        for q in queries:
-            encoded = urllib.parse.quote_plus(q)
-            pages = records.get(q, 1)  # Get calculated pages for this query
-            for page in range(1, pages + 1):
-                tasks.append([encoded, session, page, with_api, RESULTS_PER_PAGE])
-
-        logging.info(f"[Search] executing {len(tasks)} concurrent tasks")
-        results = multi_thread_run(func=search_code, tasks=tasks, thread_num=thread_num)
-
-        for result in results:
-            if result:
-                links.update(result)
-    else:
-        # Sequential execution with dynamic page calculation
-        for i, q in enumerate(queries):
-            pages = records.get(q, 1)  # Get calculated pages for this query
-            logging.info(f"[Search] executing query {i+1}/{len(queries)}, pages: {pages}, query: {q}")
-
-            encoded = urllib.parse.quote_plus(q)
-            for page in range(1, pages + 1):
-                result = search_code(
-                    query=encoded,
-                    session=session,
-                    page=page,
-                    with_api=with_api,
-                    peer_page=RESULTS_PER_PAGE,
-                )
-                if result:
-                    links.update(result)
-
-                # Rate limiting
-                if with_api and page < pages:
-                    time.sleep(random.randint(6, 12))
-
-            # Rate limiting between queries
-            if i < len(queries) - 1:
-                time.sleep(random.randint(2, 5))
-
-    result = list(links)
-    logging.info(f"[Search] refined search completed, found {len(result)} unique links")
-    return result
+    # Use progressive search strategy
+    return progressive_search(queries, session, with_api, thread_num, fast)
 
 
 def generate_api_refined_queries(query: str, total: int = 1000) -> list[str]:
@@ -1917,7 +2067,7 @@ def get_adaptive_time_step(total: int, durations: int) -> tuple[int, int]:
 
 
 def calculate_pages_for_queries(
-    queries: list[str], total: int, with_api: bool, session: str = "", precise: bool = False
+    queries: list[str], total: int, with_api: bool, session: str = "", precise: bool = True
 ) -> dict[str, int]:
     """
     Calculate the number of pages needed for each refined query.
@@ -2024,7 +2174,7 @@ def batch_search_code(
         # Check if refinement is needed for API search
         if total > API_LIMIT:
             logging.info(f"[Search] total count {total} exceeds API limit {API_LIMIT}, using refined queries")
-            return execute_refined_search(session, query, with_api=True, total=total, thread_num=thread_num, fast=fast)
+            return refined_search(session, query, with_api=True, total=total, thread_num=thread_num, fast=fast)
 
         # Use original logic for API search within limits
         count = math.ceil(total / RESULTS_PER_PAGE) if total > 0 else API_MAX_PAGES
@@ -2036,13 +2186,13 @@ def batch_search_code(
         # Check if refinement is needed for web search
         if total > WEB_LIMIT:
             logging.info(f"[Search] estimated count {total} exceeds web limit {WEB_LIMIT}, using refined queries")
-            return execute_refined_search(session, query, with_api=False, total=total, thread_num=thread_num, fast=fast)
+            return refined_search(session, query, with_api=False, total=total, thread_num=thread_num, fast=fast)
 
         # Use original logic for web search within limits
         count = WEB_MAX_PAGES
 
     # Original pagination logic for queries within limits
-    page_num = min(count if page_num < 0 or page_num > count else page_num, API_MAX_PAGES)
+    page_num = count if page_num < 0 or page_num > count else page_num
     if page_num <= 0:
         logging.error(f"[Search] page number must be greater than 0")
         return []
