@@ -11,10 +11,12 @@ import json
 import logging
 import math
 import os
+import queue
 import random
 import re
 import socket
 import ssl
+import threading
 import time
 import traceback
 import typing
@@ -23,6 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import deque
 from concurrent import futures
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -244,16 +247,20 @@ API_MAX_PAGES = 10
 WEB_MAX_PAGES = 5
 
 
-# Results per page
-RESULTS_PER_PAGE = 100
+# Results per page for API search
+API_RESULTS_PER_PAGE = 100
 
 
-# REST API limit
-API_LIMIT = API_MAX_PAGES * RESULTS_PER_PAGE
+# REST API limit (10 pages * 100 results)
+API_LIMIT = API_MAX_PAGES * API_RESULTS_PER_PAGE
+
+
+# Results per page for web search
+WEB_RESULTS_PER_PAGE = 20
 
 
 # Web search limit (5 pages * 20 results)
-WEB_LIMIT = WEB_MAX_PAGES * 20
+WEB_LIMIT = WEB_MAX_PAGES * WEB_RESULTS_PER_PAGE
 
 
 # Start date for search
@@ -1264,12 +1271,12 @@ def search_web_with_count(query: str, session: str, page: int = 1) -> tuple[list
     return results, total
 
 
-def search_github_api(query: str, token: str, page: int = 1, peer_page: int = RESULTS_PER_PAGE) -> list[str]:
+def search_github_api(query: str, token: str, page: int = 1, peer_page: int = API_RESULTS_PER_PAGE) -> list[str]:
     """rate limit: 10RPM"""
     if isblank(token) or isblank(query):
         return []
 
-    peer_page, page = min(max(peer_page, 1), 100), max(1, page)
+    peer_page, page = min(max(peer_page, 1), API_RESULTS_PER_PAGE), max(1, page)
     url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page={peer_page}&page={page}"
     headers = {
         "Accept": "application/vnd.github+json",
@@ -1299,7 +1306,7 @@ def search_github_api(query: str, token: str, page: int = 1, peer_page: int = RE
 
 
 def search_api_with_count(
-    query: str, token: str, page: int = 1, limit: int = RESULTS_PER_PAGE
+    query: str, token: str, page: int = 1, peer_page: int = API_RESULTS_PER_PAGE
 ) -> tuple[list[str], int]:
     """
     Search GitHub API and return both results and total count.
@@ -1308,8 +1315,8 @@ def search_api_with_count(
     if isblank(token) or isblank(query):
         return [], 0
 
-    limit, page = min(max(limit, 1), 100), max(1, page)
-    url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page={limit}&page={page}"
+    peer_page, page = min(max(peer_page, 1), API_RESULTS_PER_PAGE), max(1, page)
+    url = f"https://api.github.com/search/code?q={query}&sort=indexed&order=desc&per_page={peer_page}&page={page}"
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {token}",
@@ -1340,111 +1347,227 @@ def search_api_with_count(
         return [], 0
 
 
-def search_with_count(query: str, session: str, page: int, with_api: bool, limit: int) -> tuple[list[str], int]:
+def search_with_count(query: str, session: str, page: int, with_api: bool, peer_page: int) -> tuple[list[str], int]:
     """
     Unified search interface that returns both results and total count.
     Returns: (results_list, total_count)
     """
     if with_api:
-        return search_api_with_count(query, session, page, limit)
+        return search_api_with_count(query, session, page, peer_page)
     else:
         return search_web_with_count(query, session, page)
 
 
-def execute_tasks(tasks: list, with_api: bool, fast: bool, thread_num: int, first: bool) -> list:
+def can_refine_regex(query: str, partitions: int) -> bool:
     """
-    Execute search tasks with concurrent or sequential strategy.
+    Check if regex query can be further refined based on mathematical analysis.
 
     Args:
-        tasks: List of task parameters
-        with_api: Whether using API search
-        fast: Whether to use concurrent execution
-        thread_num: Number of threads for concurrent execution
-        first: True for first-page tasks, False for remaining-page tasks
+        query: The query string containing regex pattern
+        partitions: Number of partitions needed
 
     Returns:
-        List of results from executed tasks
+        True if regex can be refined to handle the partitions, False otherwise
     """
-    task_type = "first-page" if first else "remaining-page"
+    if not has_regex_pattern(query):
+        return False
 
-    if fast and thread_num:
-        # Concurrent execution
-        logging.info(f"[Search] executing {len(tasks)} {task_type} tasks concurrently")
-        if first:
-            return multi_thread_run(func=lambda task: search_with_count(*task), tasks=tasks, thread_num=thread_num)
-        else:
-            return multi_thread_run(func=search_code, tasks=tasks, thread_num=thread_num)
+    # Extract regex pattern
+    match = re.search(r"/([^/]+)/", query)
+    if not match:
+        return False
+
+    pattern = match.group(1)
+
+    # Parse pattern to find dynamic parts
+    parts = re.match(r"^([^[]*)\[([^\]]+)\]\{(\d+(?:,\d+)?)\}", pattern)
+    if not parts:
+        return False
+
+    classes = parts.group(2)
+    lengths = parts.group(3)
+
+    # Parse length specification
+    if "," in lengths:
+        _, max_len = map(int, lengths.split(","))
     else:
-        # Sequential execution
-        results = list()
-        for i, task in enumerate(tasks):
-            encoded, session, page, with_api, limit = task
-            query = urllib.parse.unquote_plus(encoded)
+        max_len = int(lengths)
 
-            logging.info(f"[Search] executing {task_type}, progress: {i+1}/{len(tasks)}, query: {query}, page: {page}")
+    # Calculate character possibilities (GitHub case-insensitive)
+    chars = parse_chars(classes)
+    count = len(chars)
 
-            if first:
-                result = search_with_count(encoded, session, page, with_api, limit)
-            else:
-                result = search_code(encoded, session, page, with_api, limit)
+    # Calculate maximum combinations with current length
+    combinations = count**max_len
 
-            results.append(result)
+    # Check if current regex can handle required partitions
+    result = combinations >= partitions
 
-            # Rate limiting
-            if i < len(tasks) - 1:
-                if with_api:
-                    time.sleep(random.randint(6, 12))
-                else:
-                    time.sleep(random.randint(2, 5))
+    logging.info(
+        f"[Search] regex analysis: chars={count}, max_len={max_len}, partitions={partitions}, can_refine={result}"
+    )
 
-        return results
+    return result
 
 
 def progressive_search(
     queries: list[str], session: str, with_api: bool, thread_num: int = None, fast: bool = False
 ) -> list[str]:
     """
-    Progressive search: query first page to get results and total count,
-    then decide whether to continue with remaining pages.
+    Progressive search using task queue with dynamic refinement support.
     """
-    results, remaining = set(), list()
+    # Initialize task queue and results
+    jobs = deque()
+    results = set()
+    limit = API_RESULTS_PER_PAGE if with_api else WEB_RESULTS_PER_PAGE
 
-    logging.info(f"[Search] starting progressive search for {len(queries)} queries")
+    # Thread-safe operations
+    queue_lock = threading.Lock()
+    results_lock = threading.Lock()
 
-    # Step 1: Query first page of all queries
-    tasks = list()
-    for query in queries:
+    def add_pages(query: str, start: int, end: int):
+        """Add page tasks to queue in thread-safe manner."""
+        with queue_lock:
+            for page in range(start, end + 1):
+                jobs.append((query, page))
+
+    def add_queries(conditions: list[str]):
+        """Add query tasks to queue in thread-safe manner."""
+        with queue_lock:
+            for query in conditions:
+                jobs.append((query, 1))
+
+    def handle_first(query: str, total: int, partitions: int):
+        """Handle first page processing and determine next actions."""
+        if partitions <= 1:
+            return
+
+        # For web search with too many partitions, try regex refinement first
+        if not with_api and partitions > WEB_MAX_PAGES and can_refine_regex(query, partitions):
+            # Generate refined queries
+            conditions = generate_regex_queries(query, total)
+            add_queries(conditions)
+
+            logging.info(f"[Search] refined query '{query}' into {len(conditions)} sub-queries")
+        else:
+            # Add remaining pages (with limit for web search)
+            if not with_api and partitions > WEB_MAX_PAGES:
+                # Web search with limit
+                add_pages(query, 2, WEB_MAX_PAGES)
+
+                logging.info(f"[Search] cannot refine '{query}', added {WEB_MAX_PAGES - 1} pages (limited)")
+            else:
+                # API search or web search within limit
+                add_pages(query, 2, partitions)
+
+                logging.info(f"[Search] query '{query}' has {total} results, added {partitions - 1} pages")
+
+    # Initialize queue with all queries
+    add_queries(queries)
+    logging.info(f"[Search] starting progressive search with {len(jobs)} initial tasks")
+
+    def process_task(item):
+        """Process a single task from the queue."""
+        query, page = item
         encoded = urllib.parse.quote_plus(query)
-        tasks.append([encoded, session, 1, with_api, RESULTS_PER_PAGE])
 
-    first_data = execute_tasks(tasks, with_api, fast, thread_num, True)
+        if page == 1:
+            # First page - get results and total count
+            data, total = search_with_count(encoded, session, page, with_api, limit)
 
-    # Step 2: Analyze results and determine remaining pages
-    count = 0
-    for i, (data, total) in enumerate(first_data):
-        if data:
-            results.update(data)
+            with results_lock:
+                if data:
+                    results.update(data)
 
-        if total > RESULTS_PER_PAGE:
-            # Calculate remaining pages
-            pages = math.ceil(total / RESULTS_PER_PAGE)
-            encoded = urllib.parse.quote_plus(queries[i])
+            # Calculate partitions needed and handle next actions
+            partitions = math.ceil(total / limit)
+            handle_first(query, total, partitions)
+        else:
+            # Subsequent pages - just get results
+            data = search_code(encoded, session, page, with_api, limit)
 
-            for page in range(2, pages + 1):
-                remaining.append([encoded, session, page, with_api, RESULTS_PER_PAGE])
+            with results_lock:
+                if data:
+                    results.update(data)
 
-            count += 1
-            logging.info(f"[Search] query '{queries[i]}' has {total} results, {pages} pages")
+    # Process tasks
+    if fast and thread_num and thread_num > 1:
+        # Concurrent processing using producer-consumer pattern
+        tasks = queue.Queue()
 
-    logging.info(f"[Search] found {count} multi-page queries, {len(remaining)} remaining tasks")
+        # Add initial tasks to queue
+        with queue_lock:
+            while jobs:
+                tasks.put(jobs.popleft())
 
-    # Step 3: Execute remaining pages
-    if remaining:
-        more_data = execute_tasks(remaining, with_api, fast, thread_num, False)
+        def worker():
+            """Worker thread function for processing tasks."""
+            while True:
+                try:
+                    # Get task with timeout to avoid infinite waiting
+                    item = tasks.get(timeout=30)
+                    if item is None:  # Poison pill - shutdown signal
+                        break
 
-        for result in more_data:
-            if result:
-                results.update(result)
+                    # Process the task
+                    process_task(item)
+
+                    # Check for new tasks added by process_task
+                    with queue_lock:
+                        while jobs:
+                            tasks.put(jobs.popleft())
+
+                    # Mark task as done
+                    tasks.task_done()
+
+                    # Rate limiting for API calls
+                    if with_api:
+                        time.sleep(random.randint(6, 12))
+                    else:
+                        time.sleep(random.randint(1, 3))
+
+                except queue.Empty:
+                    # Timeout occurred, check if all tasks are done
+                    if tasks.unfinished_tasks == 0:
+                        break
+                except Exception as e:
+                    logging.error(f"[Search] task failed: {e}")
+                    tasks.task_done()
+
+        # Start worker threads
+        workers = list()
+        for i in range(thread_num):
+            thread = threading.Thread(target=worker, name=f"SearchWorker-{i+1}")
+            thread.start()
+            workers.append(thread)
+
+        # Wait for all tasks to complete
+        tasks.join()
+
+        # Send shutdown signal to all workers
+        for _ in range(thread_num):
+            tasks.put(None)
+
+        # Wait for all worker threads to finish
+        for thread in workers:
+            thread.join()
+
+        logging.info(f"[Search] concurrent processing completed with {thread_num} workers")
+    else:
+        # Sequential processing
+        while jobs:
+            task = jobs.popleft()
+            try:
+                process_task(task)
+
+                # Rate limiting
+                if with_api:
+                    time.sleep(random.randint(6, 12))
+                else:
+                    time.sleep(random.randint(2, 5))
+
+            except Exception as e:
+                logging.error(f"[Search] task {task} failed: {e}")
 
     final = list(results)
     logging.info(f"[Search] progressive search completed, found {len(final)} unique links")
@@ -1494,7 +1617,7 @@ def estimate_web_total(query: str, session: str, content: str = None) -> int:
             logging.warning(f"[Search] initial search failed for query: {message}, using conservative estimate")
 
             # Conservative estimate
-            return WEB_LIMIT
+            return WEB_RESULTS_PER_PAGE
 
         # Check if query is already encoded to avoid double encoding
         if "%" in query and any(c in query for c in ["%2F", "%5B", "%5D", "%7B", "%7D"]):
@@ -1534,7 +1657,7 @@ def estimate_web_total(query: str, session: str, content: str = None) -> int:
         logging.error(f"[Search] estimation failed for query: {message}, error: {e}, using conservative estimate")
 
         # Conservative estimate
-        return WEB_LIMIT
+        return WEB_RESULTS_PER_PAGE
 
 
 def extract_count_from_page(content: str, query: str) -> int:
@@ -1542,9 +1665,11 @@ def extract_count_from_page(content: str, query: str) -> int:
     Extract result count from GitHub search page content.
     """
     if isblank(content):
-        return WEB_LIMIT
+        return WEB_RESULTS_PER_PAGE
 
     try:
+        message = urllib.parse.unquote_plus(query)
+
         # Try different patterns GitHub uses to show result counts
         patterns = [
             r"We\'ve found ([\d,]+) code results",
@@ -1558,16 +1683,16 @@ def extract_count_from_page(content: str, query: str) -> int:
             if match:
                 text = match.group(1).replace(",", "")
                 count = int(text)
-                logging.info(f"[Search] extracted {count} results from page for query: {query}")
+                logging.info(f"[Search] extracted {count} results from page for query: {message}")
                 return count
 
         # If no count found, use conservative estimate
-        logging.warning(f"[Search] could not extract count from page for query: {query}")
-        return WEB_LIMIT
+        logging.warning(f"[Search] could not extract count from page for query: {message}")
+        return WEB_RESULTS_PER_PAGE
 
     except Exception as e:
         logging.error(f"[Search] failed to extract count from page: {e}")
-        return WEB_LIMIT
+        return WEB_RESULTS_PER_PAGE
 
 
 def refined_search(
@@ -1671,24 +1796,6 @@ def has_regex_pattern(query: str) -> bool:
     return False
 
 
-def extract_keywords(query: str) -> list[str]:
-    """
-    Extract fixed string keywords from a query that contains regex patterns.
-    These keywords can be used for additional filtering.
-    """
-    words = []
-
-    # Extract quoted strings
-    quotes = re.findall(r'"([^"]+)"', query)
-    words.extend(quotes)
-
-    # Extract domain names and URLs
-    urls = re.findall(r'https?://[^\s"]+', query)
-    words.extend(urls)
-
-    return words
-
-
 def parse_chars(classes: str) -> set[str]:
     """
     Parse character class like 'a-zA-Z0-9_\\-' and return set of characters.
@@ -1736,7 +1843,7 @@ def parse_chars(classes: str) -> set[str]:
     return chars
 
 
-def calculate_depth(total: int, chars: int, limit: int = 100) -> int:
+def calculate_depth(total: int, chars: int, limit: int) -> int:
     """
     Calculate how many prefix characters need to be enumerated.
 
@@ -1748,6 +1855,9 @@ def calculate_depth(total: int, chars: int, limit: int = 100) -> int:
     Returns:
         Number of prefix characters to enumerate (0 means no enumeration needed)
     """
+    if limit <= 0:
+        raise ValueError("[Search] limit must be greater than 0")
+
     if total <= limit:
         return 0
 
@@ -1807,7 +1917,7 @@ def generate_regex_queries(query: str, total: int = 0) -> list[str]:
     )
 
     # Calculate enumeration depth
-    depth = calculate_depth(total, len(chars))
+    depth = calculate_depth(total, len(chars), WEB_LIMIT)
     if depth == 0:
         logging.info(f"[Search] enumeration not needed, using original query")
         return [query]
@@ -1900,111 +2010,6 @@ def generate_web_refined_queries(query: str, total: int, max_queries: int = -1) 
     return [base]
 
 
-def get_language_multiplier(lang: str) -> int:
-    """Get the multiplier for a given language based on its tier."""
-    tier = LANGUAGE_TO_TIER.get(trim(lang).lower(), "tier5")
-    return LANGUAGE_TIERS[tier].get("multiplier", 1)
-
-
-def calculate_time_slices(start: datetime, end: datetime, step: int) -> tuple[int, int]:
-    """
-    Calculate time slices between start and end dates.
-
-    Args:
-        start: Start date as datetime object
-        end: End date as datetime object
-        step: Time interval step in days
-
-    Returns:
-        Tuple of (count, span) where:
-        - count: Number of time slices
-        - span: Span per slice in days
-
-    Raises:
-        ValueError: If parameters are invalid
-    """
-    # Validate parameters
-    if not start or not end:
-        raise ValueError("[Search] start and end dates cannot be None")
-
-    if not isinstance(start, datetime) or not isinstance(end, datetime):
-        raise ValueError("[Search] start and end must be datetime objects")
-
-    if step <= 0:
-        raise ValueError("[Search] step must be greater than 0")
-
-    if start >= end:
-        raise ValueError("[Search] start date must be before end date")
-
-    # Calculate total days between dates
-    total = (end - start).days
-
-    # Calculate slice count (total / step, rounded up)
-    count = math.ceil(total / step)
-
-    # Calculate average span per slice (total / count, rounded up)
-    span = math.ceil(total / count)
-
-    return count, span
-
-
-def get_time_ranges(
-    start: datetime,
-    end: datetime,
-    step: int,
-    multiplier: int = 1,
-) -> list[tuple[str, str]]:
-    """
-    Generate time ranges between start and end dates with specified step.
-
-    Args:
-        start: Start date as datetime object
-        end: End date as datetime object
-        step: Time interval step in days
-        multiplier: Multiplier for step size, default is 1
-
-    Returns:
-        List of (start_date, end_date) tuples as strings
-
-    Raises:
-        ValueError: If parameters are invalid
-    """
-    if not start or not end:
-        raise ValueError("[Search] start and end dates cannot be None")
-
-    if not isinstance(start, datetime) or not isinstance(end, datetime):
-        raise ValueError("[Search] start and end must be datetime objects")
-
-    if step <= 0:
-        raise ValueError("[Search] step must be greater than 0")
-
-    if start >= end:
-        raise ValueError("[Search] start date must be before end date")
-
-    # Calculate diff for this range
-    diff = step * multiplier
-
-    current, serials = start, []
-    while current < end:
-        # For the last range, ensure it ends exactly on the end date
-        if current + timedelta(days=diff) >= end:
-            # Last range ends exactly on end date
-            tail = end
-        else:
-            # Normal range
-            tail = current + timedelta(days=diff - 1)
-
-        # Format dates
-        left = current.strftime("%Y-%m-%d")
-        right = tail.strftime("%Y-%m-%d")
-        serials.append((left, right))
-
-        # Move to next range
-        current += timedelta(days=diff)
-
-    return serials
-
-
 def get_language_weighted_num() -> int:
     """
     Calculate weighted sum of programming languages across all tiers.
@@ -2026,104 +2031,6 @@ def get_language_weighted_num() -> int:
 
     # 3. Round up and return
     return math.ceil(total)
-
-
-def get_adaptive_time_step(total: int, durations: int) -> tuple[int, int]:
-    """
-    Determine adaptive time step based on data volume.
-
-    Args:
-        total: Total number of expected results
-        durations: Total duration in days
-
-    Returns:
-        int: Adaptive time step in days
-        int: 0 means no language splitting needed, 1 means language splitting needed, 2 means continue with stars splitting after language splitting
-    """
-    if total <= 0 or durations <= 0:
-        raise ValueError("[Search] total and durations must be greater than 0")
-
-    # Minimum partitions needed without hitting query limit
-    partitions = math.ceil(total / WEB_LIMIT)
-
-    # Minimum time step is 1 day, so we can have at most 'durations' partitions
-    # If partitions > durations, we must split by language
-    step, flag = 1, 0 if partitions <= durations else 1
-
-    if flag == 1:
-        # Calculate weighted number of programming languages
-        num_languages = get_language_weighted_num()
-
-        # Calculate step size, durations * num_languages represents total partitions when splitting by both time and language
-        average = durations * num_languages / partitions
-        if average < 1:
-            flag = 2
-
-        step = max(1, math.ceil(average))
-    else:
-        step = max(1, math.floor(durations / partitions))
-
-    return step, flag
-
-
-def calculate_pages_for_queries(
-    queries: list[str], total: int, with_api: bool, session: str = "", precise: bool = True
-) -> dict[str, int]:
-    """
-    Calculate the number of pages needed for each refined query.
-
-    Args:
-        queries: List of refined queries
-        total: Total estimated results for original query
-        with_api: Whether using API or web search
-        session: Session for web search (required if precise=True and with_api=False)
-        precise: If True, get exact count for each query; if False, use estimation
-
-    Returns:
-        Dictionary mapping query to number of pages needed
-    """
-    max_pages = API_MAX_PAGES if with_api else WEB_MAX_PAGES
-    pages = dict()
-
-    if precise:
-        # Precise mode: get exact count for each query
-        logging.info(f"[Search] calculating precise page counts for {len(queries)} queries")
-
-        for query in queries:
-            if with_api:
-                # For API, use get_total_num to get exact count
-                count = get_total_num(query)
-                if count == 0:
-                    # Fallback to fuzzy estimation if API returns 0
-                    count = total // len(queries)
-            else:
-                # For web search, use existing estimation function
-                count = estimate_web_total(query, session)
-                if count == 0:
-                    # Fallback to fuzzy estimation if web estimation returns 0
-                    count = total // len(queries)
-
-            # Calculate pages needed
-            needed = min(math.ceil(count / RESULTS_PER_PAGE), max_pages)
-            pages[query] = max(1, needed)
-
-    else:
-        # Fuzzy mode: estimate based on total divided by number of queries
-        logging.info(f"[Search] using fuzzy estimation for {len(queries)} queries")
-
-        average = total / len(queries) if queries else total
-        needed = max(1, min(math.ceil(average / RESULTS_PER_PAGE), max_pages))
-
-        # Apply same page count to all queries
-        for query in queries:
-            pages[query] = needed
-
-    # Log summary
-    total_pages = sum(pages.values())
-    avg_pages = total_pages / len(queries) if queries else 0
-    logging.info(f"[Search] calculated pages: total={total_pages}, average={avg_pages:.1f}, max={max_pages}")
-
-    return pages
 
 
 def search_code(query: str, session: str, page: int, with_api: bool, peer_page: int) -> list[str]:
@@ -2177,7 +2084,7 @@ def batch_search_code(
             return refined_search(session, query, with_api=True, total=total, thread_num=thread_num, fast=fast)
 
         # Use original logic for API search within limits
-        count = math.ceil(total / RESULTS_PER_PAGE) if total > 0 else API_MAX_PAGES
+        count = math.ceil(total / API_RESULTS_PER_PAGE) if total > 0 else API_MAX_PAGES
     else:
         # For web search, estimate total count
         total = estimate_web_total(query=keyword, session=session)
@@ -2197,10 +2104,13 @@ def batch_search_code(
         logging.error(f"[Search] page number must be greater than 0")
         return []
 
+    # Results per page
+    peer_page = API_RESULTS_PER_PAGE if with_api else WEB_RESULTS_PER_PAGE
+
     links = list()
     if fast:
         # Concurrent requests are easy to fail but faster
-        queries = [[keyword, session, x, with_api, RESULTS_PER_PAGE] for x in range(1, page_num + 1)]
+        queries = [[keyword, session, x, with_api, peer_page] for x in range(1, page_num + 1)]
         candidates = multi_thread_run(
             func=search_code,
             tasks=queries,
@@ -2216,7 +2126,7 @@ def batch_search_code(
                 session=session,
                 page=i,
                 with_api=with_api,
-                peer_page=RESULTS_PER_PAGE,
+                peer_page=peer_page,
             )
             potentials.update([x for x in urls if x])
 
