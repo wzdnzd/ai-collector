@@ -1389,10 +1389,7 @@ def execute_refined_search(
         queries = generate_api_refined_queries(query, total)
         logging.info(f"[Search] generated {len(queries)} API queries")
     else:
-        start = datetime.strptime(SEARCH_START_DATE, "%Y-%m-%d")
-        end = datetime.now()
-
-        queries = generate_web_refined_queries(start, end, query, total, max_queries=-1)
+        queries = generate_web_refined_queries(query, total, max_queries=-1)
         logging.info(f"[Search] generated {len(queries)} web queries")
 
     if not queries:
@@ -1424,7 +1421,7 @@ def execute_refined_search(
         # Sequential execution with dynamic page calculation
         for i, q in enumerate(queries):
             pages = records.get(q, 1)  # Get calculated pages for this query
-            logging.info(f"[Search] executing query {i+1}/{len(queries)} ({pages} pages): {q}")
+            logging.info(f"[Search] executing query {i+1}/{len(queries)}, pages: {pages}, query: {q}")
 
             encoded = urllib.parse.quote_plus(q)
             for page in range(1, pages + 1):
@@ -1498,92 +1495,259 @@ def generate_api_refined_queries(query: str, total: int = 1000) -> list[str]:
     return list(queries)
 
 
-def generate_web_refined_queries(
-    start: datetime,
-    end: datetime,
-    query: str,
-    total: int,
-    max_queries: int = -1,
-) -> list[str]:
+def has_regex_pattern(query: str) -> bool:
     """
-    Generate refined queries for web search using adaptive granularity.
-    Uses progressive refinement: time -> time+language -> time+language+stars
-    Avoids query overlap by using only the finest granularity needed.
+    Check if query contains regex patterns that could benefit from prefix enumeration.
+    Supports patterns like:
+    - /AIzaSy[a-zA-Z0-9_\\-]{33}/
+    - /sk-[a-zA-Z0-9]{32,38}/
+    """
+    if not query:
+        return False
+
+    # Look for regex patterns in GitHub search format: /pattern/
+    match = re.search(r"/([^/]+)/", query)
+    if not match:
+        return False
+
+    pattern = match.group(1)
+
+    # Check for patterns with optional fixed prefix + character class + length
+    # Patterns like: AIzaSy[a-zA-Z0-9_\-]{33} or sk-[a-zA-Z0-9]{32,38} or [a-z0-9]{8}
+    parts = re.match(r"^([^[]*)\[([^\]]+)\]\{(\d+(?:,\d+)?)\}", pattern)
+    if parts:
+        return True
+
+    return False
+
+
+def extract_keywords(query: str) -> list[str]:
+    """
+    Extract fixed string keywords from a query that contains regex patterns.
+    These keywords can be used for additional filtering.
+    """
+    words = []
+
+    # Extract quoted strings
+    quotes = re.findall(r'"([^"]+)"', query)
+    words.extend(quotes)
+
+    # Extract domain names and URLs
+    urls = re.findall(r'https?://[^\s"]+', query)
+    words.extend(urls)
+
+    return words
+
+
+def parse_chars(classes: str) -> set[str]:
+    """
+    Parse character class like 'a-zA-Z0-9_\\-' and return set of characters.
+    Note: GitHub search is case-insensitive, so [a-zA-Z] only gives 26 possibilities.
+    """
+    chars = set()
+    i = 0
+    while i < len(classes):
+        if i + 2 < len(classes) and classes[i + 1] == "-":
+            # Handle ranges like a-z, A-Z, 0-9
+            start = classes[i]
+            end = classes[i + 2]
+
+            # For GitHub case-insensitive search, treat A-Z same as a-z
+            if start.isupper() and end.isupper():
+                start = start.lower()
+                end = end.lower()
+            elif start.islower() and end.isupper():
+                # Mixed case range, convert to lowercase
+                end = end.lower()
+            elif start.isupper() and end.islower():
+                start = start.lower()
+
+            for c in range(ord(start), ord(end) + 1):
+                chars.add(chr(c))
+            i += 3
+        else:
+            # Single character or escaped character
+            char = classes[i]
+            if char == "\\" and i + 1 < len(classes):
+                # Handle escaped characters like \-
+                escaped = classes[i + 1]
+                # Convert uppercase to lowercase for GitHub case-insensitive search
+                if escaped.isupper():
+                    escaped = escaped.lower()
+                chars.add(escaped)
+                i += 2
+            else:
+                # Convert uppercase to lowercase for GitHub case-insensitive search
+                if char.isupper():
+                    char = char.lower()
+                chars.add(char)
+                i += 1
+
+    return chars
+
+
+def calculate_depth(total: int, chars: int, limit: int = 100) -> int:
+    """
+    Calculate how many prefix characters need to be enumerated.
+
+    Args:
+        total: Total number of expected results
+        chars: Number of possible characters per position
+        limit: Results per page (GitHub limit)
+
+    Returns:
+        Number of prefix characters to enumerate (0 means no enumeration needed)
+    """
+    if total <= limit:
+        return 0
+
+    needed = math.ceil(total / limit)
+
+    # Find minimum depth where chars^depth >= needed
+    for depth in range(1, 10):  # Try depths 1-9
+        queries = chars**depth
+        if queries >= needed:
+            logging.info(f"[Search] selected depth {depth}: {queries} queries for {needed} needed")
+            return depth
+
+    # If no suitable depth found, use maximum
+    logging.warning(f"[Search] using maximum depth 9 for {needed} needed queries")
+    return 9
+
+
+def generate_regex_queries(query: str, total: int = 0) -> list[str]:
+    """
+    Generate queries by enumerating prefixes of complex regex patterns.
+    Supports patterns like:
+    - /AIzaSy[a-zA-Z0-9_\\-]{33}/
+    - /sk-[a-zA-Z0-9]{32,38}/
+    """
+    results = set()
+
+    # Find regex pattern in query
+    match = re.search(r"/([^/]+)/", query)
+    if not match:
+        return [query]
+
+    pattern = match.group(1)
+    base = query.replace(f"/{pattern}/", "").strip()
+
+    # Parse complex pattern: optional_prefix[char_class]{length}
+    parts = re.match(r"^([^[]*)\[([^\]]+)\]\{(\d+(?:,\d+)?)\}", pattern)
+    if not parts:
+        return [query]  # Fallback to original query
+
+    prefix = parts.group(1)
+    classes = parts.group(2)
+    lengths = parts.group(3)
+
+    # Parse length specification
+    if "," in lengths:
+        min_len, max_len = map(int, lengths.split(","))
+    else:
+        min_len = max_len = int(lengths)
+
+    # Generate character set (considering GitHub case-insensitivity)
+    chars = parse_chars(classes)
+    chars = sorted(list(chars))
+
+    logging.info(
+        f"[Search] parsed regex: prefix='{prefix}', classes='{classes}', "
+        f"length={min_len}-{max_len}, chars={len(chars)}"
+    )
+
+    # Calculate enumeration depth
+    depth = calculate_depth(total, len(chars))
+    if depth == 0:
+        logging.info(f"[Search] enumeration not needed, using original query")
+        return [query]
+
+    logging.info(f"[Search] enumerating {depth} prefix chars, expecting ~{len(chars)**depth} queries")
+
+    # Generate all possible prefix combinations
+    def combinations(chars: list[str], depth: int):
+        if depth == 0:
+            yield ""
+        else:
+            for char in chars:
+                for suffix in combinations(chars, depth - 1):
+                    yield char + suffix
+
+    # Generate queries for each prefix combination
+    for combo in combinations(chars, depth):
+        # Construct new pattern
+        full_prefix = prefix + combo
+        min_remain = max(0, min_len - depth)
+        max_remain = max(0, max_len - depth)
+
+        if min_remain == max_remain:
+            if min_remain > 0:
+                length_part = f"{{{min_remain}}}"
+                pattern = f"{full_prefix}[{classes}]{length_part}"
+            else:
+                # No remaining characters to match
+                pattern = full_prefix
+        else:
+            if max_remain > 0:
+                length_part = f"{{{min_remain},{max_remain}}}"
+                pattern = f"{full_prefix}[{classes}]{length_part}"
+            else:
+                pattern = full_prefix
+
+        # Add to query set
+        if base:
+            results.add(f"/{pattern}/ {base}")
+        else:
+            results.add(f"/{pattern}/")
+
+    logging.info(f"[Search] generated {len(results)} regex queries")
+    return list(results)
+
+
+def generate_web_refined_queries(query: str, total: int, max_queries: int = -1) -> list[str]:
+    """
+    Generate refined queries for web search using regex or language enumeration.
+    Uses regex or language prefix enumeration to split large result sets into manageable chunks.
+    Falls back to original query if enumeration is not applicable.
     """
     base = trim(query)
-    if (
-        not base
-        or not start
-        or not end
-        or not isinstance(start, datetime)
-        or not isinstance(end, datetime)
-        or start >= end
-    ):
-        logging.error(f"[Search] invalid parameters for web query generation: {start}, {end}, {query}")
+    if not base or total <= 0:
+        logging.error(f"[Search] invalid parameters for web query generation: {query}")
         return []
 
-    # Use set for automatic deduplication
-    queries = set()
+    logging.info(f"[Search] generating refined queries for {total} results")
 
-    logging.info(f"[Search] generating refined queries for {total} results with limit: {max_queries}")
-
-    # Calculate total durations
-    durations = (end - start).days
-
-    # Get adaptive time step and whether to split by language
-    step, flag = get_adaptive_time_step(total, durations)
-
-    # Define stars for refinement
-    stars = ["0..10", "11..100", "101..1000", ">1000"]
-
-    # Generate queries based on flag value
-    if flag != 1 and flag != 2:
-        # No language splitting needed - use time-only queries
-        level = "time-only"
-        if flag == 0:
-            logging.info(f"[Search] flag=0: using time-only queries")
+    # Check if query contains regex patterns that we can handle, or if it's too large to handle
+    if total > WEB_LIMIT:
+        if has_regex_pattern(base):
+            logging.info(f"[Search] detected regex pattern, attempting enumeration")
+            queries = generate_regex_queries(base, total)
         else:
-            logging.warning(f"[Search] unexpected flag value: {flag}, falling back to time-only")
+            # No regex pattern detected, use language-based splitting
+            logging.info(f"[Search] using language-based splitting for {total} results")
 
-        serials = get_time_ranges(start, end, step)
-        for left, right in serials:
-            queries.add(f"{base} created:{left}..{right}")
-    else:
-        # Language splitting needed
-        if flag == 1:
-            level = "time+language"
-            logging.info(f"[Search] flag=1: using time+language queries")
+            queries = list()
+            for lang in POPULAR_LANGUAGES:
+                queries.append(f"{base} language:{lang}")
+
+            logging.info(f"[Search] generated {len(queries)} language-based queries")
+
+        if len(queries) > 1:
+            # Successfully generated queries with regex or language-based splitting
+            logging.info(f"[Search] using enumeration with {len(queries)} queries")
+
+            if max_queries > 0 and len(queries) > max_queries:
+                queries = queries[:max_queries]
+                logging.info(f"[Search] limited to {max_queries} queries due to max_queries limit")
+
+            return queries
         else:
-            level = "time+language+stars"
-            logging.info(f"[Search] flag=2: using time+language+stars queries")
+            logging.info(f"[Search] enumeration not suitable, using original query")
+            return [base]
 
-        for lang in POPULAR_LANGUAGES:
-            # Get multiplier for this language
-            multiplier = get_language_multiplier(lang)
-
-            # Generate time ranges for this language
-            serials = get_time_ranges(start, end, step, multiplier)
-
-            for left, right in serials:
-                prefix = f"{base} created:{left}..{right} language:{lang}"
-
-                if flag == 1:
-                    # Just add the base query for flag=1
-                    queries.add(prefix)
-                else:
-                    # Add stars refinement for flag=2
-                    for star in stars:
-                        queries.add(f"{prefix} stars:{star}")
-
-    logging.info(f"[Search] using {level} queries for {len(queries)} total")
-
-    # Apply query limit if specified
-    result = list(queries)
-    if max_queries > 0 and len(result) > max_queries:
-        result = result[:max_queries]
-        logging.info(f"[Search] limited to {len(result)} with queries max: {max_queries}")
-
-    return result
+    # Fallback to original query since GitHub doesn't support created/stars splitting
+    logging.info(f"[Search] using original query as fallback")
+    return [base]
 
 
 def get_language_multiplier(lang: str) -> int:
