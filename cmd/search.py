@@ -28,10 +28,10 @@ import uuid
 from collections import deque
 from concurrent import futures
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from enum import Enum, unique
-from functools import lru_cache
+from functools import partial
 from threading import Lock
+from typing import Callable
 
 
 @unique
@@ -1234,7 +1234,12 @@ def search_github_web(query: str, session: str, page: int) -> str:
     return content
 
 
-def search_web_with_count(query: str, session: str, page: int = 1) -> tuple[list[str], int]:
+def search_web_with_count(
+    query: str,
+    session: str,
+    page: int = 1,
+    callback: Callable[[list[str], str], None] = None,
+) -> tuple[list[str], int]:
     """
     Search GitHub web and return both results and total count.
     Returns: (results_list, total_count)
@@ -1260,6 +1265,13 @@ def search_web_with_count(query: str, session: str, page: int = 1) -> tuple[list
         results = list(links)
     except:
         results = []
+
+    # Call extract callback if provided
+    if callback and isinstance(callback, Callable) and results:
+        try:
+            callback(results, content)
+        except Exception as e:
+            logging.error(f"[Search] callback failed: {e}")
 
     # Get total count (only for first page to avoid redundant calls)
     if page == 1:
@@ -1347,7 +1359,14 @@ def search_api_with_count(
         return [], 0
 
 
-def search_with_count(query: str, session: str, page: int, with_api: bool, peer_page: int) -> tuple[list[str], int]:
+def search_with_count(
+    query: str,
+    session: str,
+    page: int,
+    with_api: bool,
+    peer_page: int,
+    callback: Callable[[list[str], str], None] = None,
+) -> tuple[list[str], int]:
     """
     Unified search interface that returns both results and total count.
     Returns: (results_list, total_count)
@@ -1355,7 +1374,7 @@ def search_with_count(query: str, session: str, page: int, with_api: bool, peer_
     if with_api:
         return search_api_with_count(query, session, page, peer_page)
     else:
-        return search_web_with_count(query, session, page)
+        return search_web_with_count(query, session, page, callback)
 
 
 def can_refine_regex(query: str, partitions: int) -> bool:
@@ -1411,7 +1430,12 @@ def can_refine_regex(query: str, partitions: int) -> bool:
 
 
 def progressive_search(
-    queries: list[str], session: str, with_api: bool, thread_num: int = None, fast: bool = False
+    queries: list[str],
+    session: str,
+    with_api: bool,
+    thread_num: int = None,
+    fast: bool = False,
+    callback: Callable[[list[str], str], None] = None,
 ) -> list[str]:
     """
     Progressive search using task queue with dynamic refinement support.
@@ -1425,17 +1449,34 @@ def progressive_search(
     queue_lock = threading.Lock()
     results_lock = threading.Lock()
 
+    def record_task_addition(func):
+        """Decorator to record task addition statistics in thread-safe manner."""
+
+        def wrapper(*args, **kwargs):
+            with queue_lock:
+                before = len(jobs)
+
+                # Call the original function
+                func(*args, **kwargs)
+
+                after = len(jobs)
+                count = after - before
+
+                logging.info(f"[Search] {func.__name__}: before={before}, after={after}, added={count}")
+
+        return wrapper
+
+    @record_task_addition
     def add_pages(query: str, start: int, end: int):
         """Add page tasks to queue in thread-safe manner."""
-        with queue_lock:
-            for page in range(start, end + 1):
-                jobs.append((query, page))
+        for page in range(start, end + 1):
+            jobs.append((query, page))
 
+    @record_task_addition
     def add_queries(conditions: list[str]):
         """Add query tasks to queue in thread-safe manner."""
-        with queue_lock:
-            for query in conditions:
-                jobs.append((query, 1))
+        for query in conditions:
+            jobs.append((query, 1))
 
     def handle_first(query: str, total: int, partitions: int):
         """Handle first page processing and determine next actions."""
@@ -1473,7 +1514,7 @@ def progressive_search(
 
         if page == 1:
             # First page - get results and total count
-            data, total = search_with_count(encoded, session, page, with_api, limit)
+            data, total = search_with_count(encoded, session, page, with_api, limit, callback)
 
             with results_lock:
                 if data:
@@ -1484,7 +1525,7 @@ def progressive_search(
             handle_first(query, total, partitions)
         else:
             # Subsequent pages - just get results
-            data = search_code(encoded, session, page, with_api, limit)
+            data = search_code(encoded, session, page, with_api, limit, callback)
 
             with results_lock:
                 if data:
@@ -1702,6 +1743,7 @@ def refined_search(
     total: int,
     thread_num: int = None,
     fast: bool = False,
+    callback: Callable[[list[str], str], None] = None,
 ) -> list[str]:
     """
     Execute refined search using progressive search strategy.
@@ -1720,7 +1762,7 @@ def refined_search(
         return []
 
     # Use progressive search strategy
-    return progressive_search(queries, session, with_api, thread_num, fast)
+    return progressive_search(queries, session, with_api, thread_num, fast, callback)
 
 
 def generate_api_refined_queries(query: str, total: int = 1000) -> list[str]:
@@ -2033,7 +2075,14 @@ def get_language_weighted_num() -> int:
     return math.ceil(total)
 
 
-def search_code(query: str, session: str, page: int, with_api: bool, peer_page: int) -> list[str]:
+def search_code(
+    query: str,
+    session: str,
+    page: int,
+    with_api: bool,
+    peer_page: int,
+    callback: Callable[[list[str], str], None] = None,
+) -> list[str]:
     keyword = trim(query)
     if not keyword:
         return []
@@ -2054,7 +2103,16 @@ def search_code(query: str, session: str, page: int, with_api: bool, peer_page: 
         for uri in uris:
             links.add(f"https://github.com{uri}")
 
-        return list(links)
+        results = list(links)
+
+        # Call extract callback if provided
+        if callback and isinstance(callback, Callable) and results:
+            try:
+                callback(results, content)
+            except Exception as e:
+                logging.error(f"[Search] callback failed: {e}")
+
+        return results
     except:
         return []
 
@@ -2063,9 +2121,9 @@ def batch_search_code(
     session: str,
     query: str,
     with_api: bool = False,
-    page_num: int = -1,
     thread_num: int = None,
     fast: bool = False,
+    callback: Callable[[list[str], str], None] = None,
 ) -> list[str]:
     session, query = trim(session), trim(query)
     if not query or not session:
@@ -2081,10 +2139,15 @@ def batch_search_code(
         # Check if refinement is needed for API search
         if total > API_LIMIT:
             logging.info(f"[Search] total count {total} exceeds API limit {API_LIMIT}, using refined queries")
-            return refined_search(session, query, with_api=True, total=total, thread_num=thread_num, fast=fast)
-
-        # Use original logic for API search within limits
-        count = math.ceil(total / API_RESULTS_PER_PAGE) if total > 0 else API_MAX_PAGES
+            return refined_search(
+                session,
+                query,
+                with_api=True,
+                total=total,
+                thread_num=thread_num,
+                fast=fast,
+                callback=callback,
+            )
     else:
         # For web search, estimate total count
         total = estimate_web_total(query=keyword, session=session)
@@ -2092,49 +2155,26 @@ def batch_search_code(
 
         # Check if refinement is needed for web search
         if total > WEB_LIMIT:
-            logging.info(f"[Search] estimated count {total} exceeds web limit {WEB_LIMIT}, using refined queries")
-            return refined_search(session, query, with_api=False, total=total, thread_num=thread_num, fast=fast)
-
-        # Use original logic for web search within limits
-        count = WEB_MAX_PAGES
-
-    # Original pagination logic for queries within limits
-    page_num = count if page_num < 0 or page_num > count else page_num
-    if page_num <= 0:
-        logging.error(f"[Search] page number must be greater than 0")
-        return []
-
-    # Results per page
-    peer_page = API_RESULTS_PER_PAGE if with_api else WEB_RESULTS_PER_PAGE
-
-    links = list()
-    if fast:
-        # Concurrent requests are easy to fail but faster
-        queries = [[keyword, session, x, with_api, peer_page] for x in range(1, page_num + 1)]
-        candidates = multi_thread_run(
-            func=search_code,
-            tasks=queries,
-            thread_num=thread_num,
-        )
-        links = list(set(itertools.chain.from_iterable(candidates)))
-    else:
-        # Sequential requests are more stable but slower
-        potentials = set()
-        for i in range(1, page_num + 1):
-            urls = search_code(
-                query=keyword,
-                session=session,
-                page=i,
-                with_api=with_api,
-                peer_page=peer_page,
+            logging.info(f"[Search] total count {total} exceeds web limit {WEB_LIMIT}, using refined queries")
+            return refined_search(
+                session,
+                query,
+                with_api=False,
+                total=total,
+                thread_num=thread_num,
+                fast=fast,
+                callback=callback,
             )
-            potentials.update([x for x in urls if x])
 
-            # Avoid github api rate limit: 10RPM
-            if i < page_num:
-                time.sleep(random.randint(6, 12))
-
-        links = list(potentials)
+    # Use progressive search for better handling
+    links = progressive_search(
+        queries=[query],
+        session=session,
+        with_api=with_api,
+        thread_num=thread_num,
+        fast=fast,
+        callback=callback,
+    )
 
     if not links:
         logging.warning(f"[Search] cannot found any link with query: {query}")
@@ -2142,7 +2182,6 @@ def batch_search_code(
     return links
 
 
-@lru_cache(maxsize=2000)
 def collect(
     url: str,
     key_pattern: str,
@@ -2150,11 +2189,18 @@ def collect(
     address_pattern: str = "",
     endpoint_pattern: str = "",
     model_pattern: str = "",
+    text: str = None,
 ) -> list[Service]:
-    if not isinstance(url, str) or not isinstance(key_pattern, str):
+    if (not isinstance(url, str) and not isinstance(text, str)) or not isinstance(key_pattern, str):
         return []
 
-    content = http_get(url=url, retries=retries, interval=1)
+    if text:
+        content = text
+    else:
+        content = http_get(url=url, retries=retries, interval=1)
+
+    if not content:
+        return []
 
     # extract keys from content
     key_pattern = trim(key_pattern)
@@ -2223,28 +2269,38 @@ def extract(text: str, regex: str) -> list[str]:
     return list(items)
 
 
+def persist_keys(services: list[Service], filepath: str, overwrite: bool = True) -> None:
+    """
+    Persist keys to file
+
+    Args:
+        services: list of Service
+        filepath: path to save keys
+        overwrite: whether to overwrite existing file
+
+    Returns: None
+    """
+    filepath = trim(filepath)
+    if not filepath or not services:
+        logging.error("services or filepath cannot be empty")
+        return
+
+    lines = [x.serialize() for x in services if x]
+    if not write_file(directory=filepath, lines=lines, overwrite=overwrite):
+        logging.error(f"[Scan] failed to save keys to file: {filepath}, keys: {lines}")
+    else:
+        logging.info(f"[Scan] saved {len(lines)} keys to file: {filepath}")
+
+
 def scan(
     session: str,
     provider: Provider,
     with_api: bool = False,
-    page_num: int = -1,
     thread_num: int = None,
     fast: bool = False,
     skip: bool = False,
     workspace: str = "",
 ) -> None:
-    def persist(services: list[Service], filepath: str) -> None:
-        filepath = trim(filepath)
-        if not filepath or not services:
-            logging.error("services or filepath cannot be empty")
-            return
-
-        lines = [x.serialize() for x in services if x]
-        if not write_file(directory=filepath, lines=lines):
-            logging.error(f"[Scan] {provider.name}: failed to save keys to file: {filepath}, keys: {lines}")
-        else:
-            logging.info(f"[Scan] {provider.name}: saved {len(lines)} keys to file: {filepath}")
-
     if not isinstance(provider, Provider):
         return
 
@@ -2290,16 +2346,21 @@ def scan(
                 f"[Scan] {provider.name}: start to search new keys with query: {query or regex}, regex: {regex}"
             )
 
+            # Prepare temporary files for extract callback
+            extra_params = provider.extras.copy() if provider.extras else dict()
+            extra_params["temp_keys_file"] = os.path.join(directory, "temp-keys.txt")
+            extra_params["temp_links_file"] = os.path.join(directory, "temp-links.txt")
+
+            # Search new keys with conditions and links file
             parts = recall(
                 regex=regex,
                 session=session,
                 query=query,
                 with_api=with_api,
-                page_num=page_num,
                 thread_num=thread_num,
                 fast=fast,
                 links_file=links_file,
-                extra_params=provider.extras,
+                extra_params=extra_params,
             )
 
             if parts:
@@ -2330,7 +2391,7 @@ def scan(
     # remove invalid keys and ave all potential keys to material file
     materials: list[Service] = [caches[i] for i in range(len(masks)) if masks[i].reason != ErrorReason.INVALID_KEY]
     if materials:
-        persist(services=materials, filepath=material_keys_file)
+        persist_keys(services=materials, filepath=material_keys_file)
 
     # save candidates and avaiable status
     statistics = dict()
@@ -2340,7 +2401,7 @@ def scan(
     if not valid_services:
         logging.warning(f"[Scan] {provider.name}: cannot found any key with conditions: {provider.conditions}")
     else:
-        persist(services=valid_services, filepath=valid_keys_file)
+        persist_keys(services=valid_services, filepath=valid_keys_file)
 
         statistics.update({s: True for s in valid_services})
 
@@ -2353,7 +2414,7 @@ def scan(
 
         # save no quota keys to file
         no_quota_keys_file = os.path.join(directory, provider.no_quota_filename)
-        persist(services=no_quota_services, filepath=no_quota_keys_file)
+        persist_keys(services=no_quota_services, filepath=no_quota_keys_file)
 
     # not expired keys but wait to check again keys
     wait_check_services: list[Service] = [
@@ -2368,7 +2429,7 @@ def scan(
 
         # save wait check keys to file
         wait_check_keys_file = os.path.join(directory, provider.wait_check_filename)
-        persist(services=wait_check_services, filepath=wait_check_keys_file)
+        persist_keys(services=wait_check_services, filepath=wait_check_keys_file)
 
     # list supported models for each key
     services, tasks = [], []
@@ -2417,7 +2478,6 @@ def recall(
     session: str,
     query: str = "",
     with_api: bool = False,
-    page_num: int = -1,
     thread_num: int = None,
     fast: bool = False,
     links_file: str = "",
@@ -2445,18 +2505,87 @@ def recall(
         text = regex.replace("/", "\\/")
         query = f"/{text}/"
 
+    if not isinstance(extra_params, dict):
+        extra_params = dict()
+
+    address_pattern = extra_params.get("address_pattern", "")
+    endpoint_pattern = extra_params.get("endpoint_pattern", "")
+    model_pattern = extra_params.get("model_pattern", "")
+    temp_keys_file = extra_params.get("temp_keys_file", "")
+    temp_links_file = extra_params.get("temp_links_file", "")
+
     if session:
+        # Create process callback as closure function using partial
+        callback = None
+        if temp_keys_file or temp_links_file:
+            # Process search page content and save extracted results
+            def process(
+                urls: list[str],
+                text: str,
+                pattern: str,
+                address: str,
+                endpoint: str,
+                model: str,
+                keys_file: str,
+                links_file: str,
+            ) -> list[Service]:
+                results = list()
+
+                try:
+                    # Extract services from search page content
+                    if text and pattern:
+                        services = collect(
+                            url="",
+                            key_pattern=pattern,
+                            address_pattern=address,
+                            endpoint_pattern=endpoint,
+                            model_pattern=model,
+                            text=text,
+                        )
+
+                        if services:
+                            results.extend(services)
+
+                            # Save services to temporary file
+                            if keys_file:
+                                persist_keys(services=services, filepath=keys_file, overwrite=False)
+
+                    # Save links to temporary file
+                    if urls and links_file:
+                        write_file(links_file, urls, overwrite=False)
+
+                except Exception as e:
+                    logging.error(f"[Search] process callback failed: {e}")
+
+                return results
+
+            # Use partial function to fix parameters
+            callback = partial(
+                process,
+                pattern=regex,
+                address=address_pattern,
+                endpoint=endpoint_pattern,
+                model=model_pattern,
+                keys_file=temp_keys_file,
+                links_file=temp_links_file,
+            )
+
+        # Search new links with query and session
         sources = batch_search_code(
             session=session,
             query=query,
             with_api=with_api,
-            page_num=page_num,
             thread_num=thread_num,
             fast=fast,
+            callback=callback,
         )
         if sources:
             links.update(sources)
 
+    # Load temporary links from file if exists
+    links.update(read_file(filepath=temp_links_file))
+
+    # Load links from file if exists
     if not links:
         logging.warning(f"[Recall] cannot found any link with query: {query}")
         return []
@@ -2467,17 +2596,21 @@ def recall(
 
     logging.info(f"[Recall] start to extract candidates from {len(links)} links")
 
-    if not isinstance(extra_params, dict):
-        extra_params = dict()
-
-    address_pattern = extra_params.get("address_pattern", "")
-    endpoint_pattern = extra_params.get("endpoint_pattern", "")
-    model_pattern = extra_params.get("model_pattern", "")
-
     tasks = [[x, regex, 3, address_pattern, endpoint_pattern, model_pattern] for x in links if x]
     result = multi_thread_run(func=collect, tasks=tasks, thread_num=thread_num)
+    services = [] if not result else list(itertools.chain.from_iterable([x for x in result if x]))
 
-    return [] if not result else list(itertools.chain.from_iterable([x for x in result if x]))
+    # Load temporary keys from file if exists
+    if temp_keys_file and os.path.exists(temp_keys_file) and os.path.isfile(temp_keys_file):
+        with open(temp_keys_file, "r", encoding="utf8") as f:
+            for line in f.readlines():
+                text = trim(line)
+                if not text or text.startswith(";") or text.startswith("#"):
+                    continue
+
+                services.append(Service.deserialize(text=text))
+
+    return services
 
 
 def chat(
@@ -2554,7 +2687,6 @@ def chat(
 def scan_anthropic_keys(
     session: str,
     with_api: bool = False,
-    page_num: int = -1,
     fast: bool = False,
     skip: bool = False,
     thread_num: int = None,
@@ -2574,7 +2706,6 @@ def scan_anthropic_keys(
         session=session,
         provider=provider,
         with_api=with_api,
-        page_num=page_num,
         thread_num=thread_num,
         fast=fast,
         skip=skip,
@@ -2585,7 +2716,6 @@ def scan_anthropic_keys(
 def scan_azure_keys(
     session: str,
     with_api: bool = False,
-    page_num: int = -1,
     fast: bool = False,
     skip: bool = False,
     thread_num: int = None,
@@ -2606,7 +2736,6 @@ def scan_azure_keys(
         session=session,
         provider=provider,
         with_api=with_api,
-        page_num=page_num,
         thread_num=thread_num,
         fast=fast,
         skip=skip,
@@ -2617,7 +2746,6 @@ def scan_azure_keys(
 def scan_gemini_keys(
     session: str,
     with_api: bool = False,
-    page_num: int = -1,
     fast: bool = False,
     skip: bool = False,
     thread_num: int = None,
@@ -2637,7 +2765,6 @@ def scan_gemini_keys(
         session=session,
         provider=provider,
         with_api=with_api,
-        page_num=page_num,
         thread_num=thread_num,
         fast=fast,
         skip=skip,
@@ -2648,7 +2775,6 @@ def scan_gemini_keys(
 def scan_gooeyai_keys(
     session: str,
     with_api: bool = False,
-    page_num: int = -1,
     fast: bool = False,
     skip: bool = False,
     thread_num: int = None,
@@ -2668,7 +2794,6 @@ def scan_gooeyai_keys(
         session=session,
         provider=provider,
         with_api=with_api,
-        page_num=page_num,
         thread_num=thread_num,
         fast=fast,
         skip=skip,
@@ -2679,7 +2804,6 @@ def scan_gooeyai_keys(
 def scan_openai_keys(
     session: str,
     with_api: bool = False,
-    page_num: int = -1,
     fast: bool = False,
     skip: bool = False,
     thread_num: int = None,
@@ -2697,7 +2821,6 @@ def scan_openai_keys(
         session=session,
         provider=provider,
         with_api=with_api,
-        page_num=page_num,
         thread_num=thread_num,
         fast=fast,
         skip=skip,
@@ -2708,7 +2831,6 @@ def scan_openai_keys(
 def scan_doubao_keys(
     session: str,
     with_api: bool = False,
-    page_num: int = -1,
     fast: bool = False,
     skip: bool = False,
     thread_num: int = None,
@@ -2728,7 +2850,6 @@ def scan_doubao_keys(
         session=session,
         provider=provider,
         with_api=with_api,
-        page_num=page_num,
         thread_num=thread_num,
         fast=fast,
         skip=skip,
@@ -2739,7 +2860,6 @@ def scan_doubao_keys(
 def scan_qianfan_keys(
     session: str,
     with_api: bool = False,
-    page_num: int = -1,
     fast: bool = False,
     skip: bool = False,
     thread_num: int = None,
@@ -2755,7 +2875,6 @@ def scan_qianfan_keys(
         session=session,
         provider=provider,
         with_api=with_api,
-        page_num=page_num,
         thread_num=thread_num,
         fast=fast,
         skip=skip,
@@ -2766,7 +2885,6 @@ def scan_qianfan_keys(
 def scan_stabilityai_keys(
     session: str,
     with_api: bool = False,
-    page_num: int = -1,
     fast: bool = False,
     skip: bool = False,
     thread_num: int = None,
@@ -2785,7 +2903,6 @@ def scan_stabilityai_keys(
         session=session,
         provider=provider,
         with_api=with_api,
-        page_num=page_num,
         thread_num=thread_num,
         fast=fast,
         skip=skip,
@@ -2859,7 +2976,6 @@ def scan_others(args: argparse.Namespace) -> None:
         session=args.session,
         provider=provider,
         with_api=args.rest,
-        page_num=args.num,
         thread_num=args.thread,
         fast=args.fast,
         skip=args.elide,
@@ -2946,7 +3062,7 @@ def http_get(
     )
 
 
-def multi_thread_run(func: typing.Callable, tasks: list, thread_num: int = None) -> list:
+def multi_thread_run(func: Callable, tasks: list, thread_num: int = None) -> list:
     if not func or not tasks or not isinstance(tasks, list):
         return []
 
@@ -3054,7 +3170,6 @@ def main(args: argparse.Namespace) -> None:
         scan_azure_keys(
             session=session,
             with_api=args.rest,
-            page_num=args.num,
             thread_num=args.thread,
             fast=args.fast,
             skip=args.elide,
@@ -3066,7 +3181,6 @@ def main(args: argparse.Namespace) -> None:
         scan_doubao_keys(
             session=session,
             with_api=args.rest,
-            page_num=args.num,
             thread_num=args.thread,
             fast=args.fast,
             skip=args.elide,
@@ -3078,7 +3192,6 @@ def main(args: argparse.Namespace) -> None:
         scan_anthropic_keys(
             session=session,
             with_api=args.rest,
-            page_num=args.num,
             thread_num=args.thread,
             fast=args.fast,
             skip=args.elide,
@@ -3090,7 +3203,6 @@ def main(args: argparse.Namespace) -> None:
         scan_gemini_keys(
             session=session,
             with_api=args.rest,
-            page_num=args.num,
             thread_num=args.thread,
             fast=args.fast,
             skip=args.elide,
@@ -3102,7 +3214,6 @@ def main(args: argparse.Namespace) -> None:
         scan_gooeyai_keys(
             session=session,
             with_api=args.rest,
-            page_num=args.num,
             thread_num=args.thread,
             fast=args.fast,
             skip=args.elide,
@@ -3114,7 +3225,6 @@ def main(args: argparse.Namespace) -> None:
         scan_openai_keys(
             session=session,
             with_api=args.rest,
-            page_num=args.num,
             thread_num=args.thread,
             fast=args.fast,
             skip=args.elide,
@@ -3126,7 +3236,6 @@ def main(args: argparse.Namespace) -> None:
         scan_qianfan_keys(
             session=session,
             with_api=args.rest,
-            page_num=args.num,
             thread_num=args.thread,
             fast=args.fast,
             skip=args.elide,
@@ -3138,7 +3247,6 @@ def main(args: argparse.Namespace) -> None:
         scan_stabilityai_keys(
             session=session,
             with_api=args.rest,
-            page_num=args.num,
             thread_num=args.thread,
             fast=args.fast,
             skip=args.elide,
@@ -3205,15 +3313,6 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="scan gemini api keys",
-    )
-
-    parser.add_argument(
-        "-n",
-        "--num",
-        type=int,
-        required=False,
-        default=-1,
-        help="number of pages to scan. default is -1, mean scan all pages",
     )
 
     parser.add_argument(
