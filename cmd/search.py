@@ -1435,6 +1435,7 @@ def progressive_search(
     with_api: bool,
     thread_num: int = None,
     fast: bool = False,
+    interval: float = 0,
     callback: Callable[[list[str], str], None] = None,
 ) -> list[str]:
     """
@@ -1562,10 +1563,8 @@ def progressive_search(
                     tasks.task_done()
 
                     # Rate limiting for API calls
-                    if with_api:
-                        time.sleep(random.randint(6, 12))
-                    else:
-                        time.sleep(random.randint(1, 3))
+                    if interval > 0:
+                        time.sleep(interval)
 
                 except queue.Empty:
                     # Timeout occurred, check if all tasks are done
@@ -1602,10 +1601,8 @@ def progressive_search(
                 process_task(task)
 
                 # Rate limiting
-                if with_api:
-                    time.sleep(random.randint(6, 12))
-                else:
-                    time.sleep(random.randint(2, 5))
+                if interval > 0:
+                    time.sleep(interval)
 
             except Exception as e:
                 logging.error(f"[Search] task {task} failed: {e}")
@@ -1743,6 +1740,7 @@ def refined_search(
     total: int,
     thread_num: int = None,
     fast: bool = False,
+    interval: float = 0,
     callback: Callable[[list[str], str], None] = None,
 ) -> list[str]:
     """
@@ -1762,7 +1760,7 @@ def refined_search(
         return []
 
     # Use progressive search strategy
-    return progressive_search(queries, session, with_api, thread_num, fast, callback)
+    return progressive_search(queries, session, with_api, thread_num, fast, interval, callback)
 
 
 def generate_api_refined_queries(query: str, total: int = 1000) -> list[str]:
@@ -2123,6 +2121,7 @@ def batch_search_code(
     with_api: bool = False,
     thread_num: int = None,
     fast: bool = False,
+    interval: float = 0,
     callback: Callable[[list[str], str], None] = None,
 ) -> list[str]:
     session, query = trim(session), trim(query)
@@ -2146,6 +2145,7 @@ def batch_search_code(
                 total=total,
                 thread_num=thread_num,
                 fast=fast,
+                interval=interval,
                 callback=callback,
             )
     else:
@@ -2163,6 +2163,7 @@ def batch_search_code(
                 total=total,
                 thread_num=thread_num,
                 fast=fast,
+                interval=interval,
                 callback=callback,
             )
 
@@ -2173,6 +2174,7 @@ def batch_search_code(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         callback=callback,
     )
 
@@ -2298,6 +2300,7 @@ def scan(
     with_api: bool = False,
     thread_num: int = None,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     workspace: str = "",
 ) -> None:
@@ -2359,6 +2362,7 @@ def scan(
                 with_api=with_api,
                 thread_num=thread_num,
                 fast=fast,
+                interval=interval,
                 links_file=links_file,
                 extra_params=extra_params,
             )
@@ -2480,6 +2484,7 @@ def recall(
     with_api: bool = False,
     thread_num: int = None,
     fast: bool = False,
+    interval: float = 0,
     links_file: str = "",
     extra_params: dict = None,
 ) -> list[Service]:
@@ -2577,6 +2582,7 @@ def recall(
             with_api=with_api,
             thread_num=thread_num,
             fast=fast,
+            interval=interval,
             callback=callback,
         )
         if sources:
@@ -2688,6 +2694,7 @@ def scan_anthropic_keys(
     session: str,
     with_api: bool = False,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     thread_num: int = None,
     workspace: str = "",
@@ -2708,6 +2715,7 @@ def scan_anthropic_keys(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         skip=skip,
         workspace=workspace,
     )
@@ -2717,6 +2725,7 @@ def scan_azure_keys(
     session: str,
     with_api: bool = False,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     thread_num: int = None,
     workspace: str = "",
@@ -2738,6 +2747,7 @@ def scan_azure_keys(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         skip=skip,
         workspace=workspace,
     )
@@ -2747,6 +2757,7 @@ def scan_gemini_keys(
     session: str,
     with_api: bool = False,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     thread_num: int = None,
     workspace: str = "",
@@ -2767,6 +2778,7 @@ def scan_gemini_keys(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         skip=skip,
         workspace=workspace,
     )
@@ -2776,6 +2788,7 @@ def scan_gooeyai_keys(
     session: str,
     with_api: bool = False,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     thread_num: int = None,
     workspace: str = "",
@@ -2796,6 +2809,7 @@ def scan_gooeyai_keys(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         skip=skip,
         workspace=workspace,
     )
@@ -2805,6 +2819,7 @@ def scan_openai_keys(
     session: str,
     with_api: bool = False,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     thread_num: int = None,
     workspace: str = "",
@@ -2823,6 +2838,7 @@ def scan_openai_keys(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         skip=skip,
         workspace=workspace,
     )
@@ -2832,6 +2848,7 @@ def scan_doubao_keys(
     session: str,
     with_api: bool = False,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     thread_num: int = None,
     workspace: str = "",
@@ -2852,6 +2869,7 @@ def scan_doubao_keys(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         skip=skip,
         workspace=workspace,
     )
@@ -2861,6 +2879,7 @@ def scan_qianfan_keys(
     session: str,
     with_api: bool = False,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     thread_num: int = None,
     workspace: str = "",
@@ -2877,6 +2896,7 @@ def scan_qianfan_keys(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         skip=skip,
         workspace=workspace,
     )
@@ -2886,6 +2906,7 @@ def scan_stabilityai_keys(
     session: str,
     with_api: bool = False,
     fast: bool = False,
+    interval: float = 0,
     skip: bool = False,
     thread_num: int = None,
     workspace: str = "",
@@ -2905,6 +2926,7 @@ def scan_stabilityai_keys(
         with_api=with_api,
         thread_num=thread_num,
         fast=fast,
+        interval=interval,
         skip=skip,
         workspace=workspace,
     )
@@ -2978,6 +3000,7 @@ def scan_others(args: argparse.Namespace) -> None:
         with_api=args.rest,
         thread_num=args.thread,
         fast=args.fast,
+        interval=args.interval,
         skip=args.elide,
         workspace=args.workspace,
     )
@@ -3172,17 +3195,7 @@ def main(args: argparse.Namespace) -> None:
             with_api=args.rest,
             thread_num=args.thread,
             fast=args.fast,
-            skip=args.elide,
-            workspace=args.workspace,
-            model=args.pm,
-        )
-
-    if args.doubao:
-        scan_doubao_keys(
-            session=session,
-            with_api=args.rest,
-            thread_num=args.thread,
-            fast=args.fast,
+            interval=args.interval,
             skip=args.elide,
             workspace=args.workspace,
             model=args.pm,
@@ -3194,6 +3207,19 @@ def main(args: argparse.Namespace) -> None:
             with_api=args.rest,
             thread_num=args.thread,
             fast=args.fast,
+            interval=args.interval,
+            skip=args.elide,
+            workspace=args.workspace,
+            model=args.pm,
+        )
+
+    if args.doubao:
+        scan_doubao_keys(
+            session=session,
+            with_api=args.rest,
+            thread_num=args.thread,
+            fast=args.fast,
+            interval=args.interval,
             skip=args.elide,
             workspace=args.workspace,
             model=args.pm,
@@ -3205,6 +3231,7 @@ def main(args: argparse.Namespace) -> None:
             with_api=args.rest,
             thread_num=args.thread,
             fast=args.fast,
+            interval=args.interval,
             skip=args.elide,
             workspace=args.workspace,
             model=args.pm,
@@ -3216,6 +3243,7 @@ def main(args: argparse.Namespace) -> None:
             with_api=args.rest,
             thread_num=args.thread,
             fast=args.fast,
+            interval=args.interval,
             skip=args.elide,
             workspace=args.workspace,
             model=args.pm,
@@ -3227,6 +3255,7 @@ def main(args: argparse.Namespace) -> None:
             with_api=args.rest,
             thread_num=args.thread,
             fast=args.fast,
+            interval=args.interval,
             skip=args.elide,
             workspace=args.workspace,
             model=args.pm,
@@ -3238,6 +3267,7 @@ def main(args: argparse.Namespace) -> None:
             with_api=args.rest,
             thread_num=args.thread,
             fast=args.fast,
+            interval=args.interval,
             skip=args.elide,
             workspace=args.workspace,
             model=args.pm,
@@ -3249,6 +3279,7 @@ def main(args: argparse.Namespace) -> None:
             with_api=args.rest,
             thread_num=args.thread,
             fast=args.fast,
+            interval=args.interval,
             skip=args.elide,
             workspace=args.workspace,
             model=args.pm,
@@ -3313,6 +3344,15 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="scan gemini api keys",
+    )
+
+    parser.add_argument(
+        "-i",
+        "--interval",
+        type=float,
+        required=False,
+        default=0,
+        help="interval between requests in seconds to avoid rate limit, default is 0",
     )
 
     parser.add_argument(
