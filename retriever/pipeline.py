@@ -30,6 +30,8 @@ from task import (
     TaskFactory,
 )
 
+import logger
+import utils
 from logger import (
     get_check_logger,
     get_collect_logger,
@@ -52,6 +54,7 @@ class PipelineStage(ABC):
         upstream: Optional["PipelineStage"] = None,
         thread_count: int = 1,
         queue_size: int = 1000,
+        max_retries_requeued: int = 0,
     ) -> None:
         self.name = name
         self.worker_func = worker_func
@@ -70,16 +73,23 @@ class PipelineStage(ABC):
         self.running = False
         self.accepting_tasks = True
 
+        # Maximum number of requeues
+        self.max_retries_requeued = max(max_retries_requeued, 0)
+
         # Statistics
         self.total_processed = 0
         self.total_errors = 0
         self.last_activity = time.time()
         self.start_time = time.time()
 
+        # Work state tracking
+        self.active_workers = 0
+        self.work_lock = threading.Lock()
+
         # Thread safety
         self.stats_lock = threading.Lock()
 
-        pipeline_logger.info(f"Created pipeline stage: {name} (threads: {thread_count}, queue: {queue_size})")
+        pipeline_logger.info(f"Created pipeline stage: {name}, threads: {thread_count}, queue: {queue_size}")
 
     def start(self) -> None:
         """Start worker threads"""
@@ -94,7 +104,7 @@ class PipelineStage(ABC):
             worker.start()
             self.workers.append(worker)
 
-        pipeline_logger.info(f"Started {len(self.workers)} workers for {self.name} stage")
+        pipeline_logger.info(f"[{self.name}] started {len(self.workers)} workers")
 
     def stop(self, timeout: float = constants.DEFAULT_SHUTDOWN_TIMEOUT) -> None:
         """Stop worker threads gracefully"""
@@ -117,12 +127,12 @@ class PipelineStage(ABC):
             if worker.is_alive():
                 worker.join(timeout=5.0)
 
-        pipeline_logger.info(f"Stopped {self.name} stage")
+        pipeline_logger.info(f"[{self.name}] all workers is stoped")
 
     def put_task(self, task: ProviderTask) -> bool:
         """Add task to queue with deduplication check"""
         if not self.accepting_tasks:
-            pipeline_logger.warning(f"Stage {self.name} is not accepting new tasks, discard task: {task}")
+            pipeline_logger.warning(f"[{self.name}] queue is not accepting new tasks, discard: {task}")
             return False
 
         # Generate task ID for deduplication
@@ -130,8 +140,11 @@ class PipelineStage(ABC):
 
         # Check if task already processed
         with self.dedup_lock:
-            if task_id in self.processed_tasks:
-                pipeline_logger.debug(f"Task already processed, skipping: {task_id}")
+            # Logic: attempts == 0 means it is a new task, but the same task has already been queued.
+            if task_id in self.processed_tasks and (task.attempts == 0 or task.attempts > self.max_retries_requeued):
+                pipeline_logger.warning(
+                    f"[{self.name}] task has been processed or the maximum number of retries has been reached, discard: {task_id}"
+                )
                 return False
 
         # Try to add to queue
@@ -139,10 +152,10 @@ class PipelineStage(ABC):
             self.task_queue.put(task, timeout=1.0)
             with self.dedup_lock:
                 self.processed_tasks.add(task_id)
-            pipeline_logger.debug(f"Task: {task_id} added to queue: {self.name}")
+
             return True
         except queue.Full:
-            pipeline_logger.warning(f"Queue full for {self.name} stage")
+            pipeline_logger.warning(f"[{self.name}] queue is full")
             return False
 
     def is_finished(self) -> bool:
@@ -196,7 +209,7 @@ class PipelineStage(ABC):
             try:
                 self.task_queue.put_nowait(task)
             except queue.Full:
-                pipeline_logger.warning(f"Lost task during persistence: {task.task_id}")
+                pipeline_logger.warning(f"[{self.name}] lost task during persistence: {task.task_id}")
 
         return tasks
 
@@ -209,7 +222,7 @@ class PipelineStage(ABC):
         self.accepting_tasks = False
 
     @abstractmethod
-    def process_task(self, task: ProviderTask) -> Any:
+    def process_task(self, task: ProviderTask) -> Tuple[bool, Any]:
         """Process a single task (implemented by subclasses)"""
         pass
 
@@ -225,24 +238,34 @@ class PipelineStage(ABC):
                 # Get task with timeout
                 task = self.task_queue.get(timeout=1.0)
 
+                # Mark worker as active
+                with self.work_lock:
+                    self.active_workers += 1
+
                 # Update activity time
                 with self.stats_lock:
                     self.last_activity = time.time()
 
                 # Process task
                 try:
-                    result = self.process_task(task)
+                    requeue, result = self.process_task(task)
+                    if requeue and isinstance(result, ProviderTask):
+                        result.attempts += 1
+                        success = self.put_task(result)
+
+                        status = "successfully" if success else "failed"
+                        pipeline_logger.warning(f"[{self.name}] Requeued queue {status}, task: {result}")
 
                     # Update success statistics
                     with self.stats_lock:
                         self.total_processed += 1
 
                     # Handle result if returned
-                    if result:
+                    if not requeue and result:
                         self._handle_result(task, result)
 
                 except Exception as e:
-                    pipeline_logger.error(f"Error processing task in {self.name}: {e}")
+                    pipeline_logger.error(f"[{self.name}] error processing task, message: {e}")
 
                     # Update error statistics
                     with self.stats_lock:
@@ -250,6 +273,10 @@ class PipelineStage(ABC):
                         self.total_processed += 1
 
                 finally:
+                    # Mark worker as inactive
+                    with self.work_lock:
+                        self.active_workers -= 1
+
                     # Mark task as done
                     self.task_queue.task_done()
 
@@ -257,7 +284,7 @@ class PipelineStage(ABC):
                 # Timeout waiting for task, continue loop
                 continue
             except Exception as e:
-                pipeline_logger.error(f"Worker error in {self.name}: {e}")
+                pipeline_logger.error(f"[{self.name}] worker occur error, message: {e}")
 
     def _handle_result(self, task: ProviderTask, result: Any) -> None:
         """Handle task result (can be overridden by subclasses)"""
@@ -278,7 +305,6 @@ class SearchStage(PipelineStage):
         rate_limiter: RateLimiter,
         result_manager: MultiResultManager,
         config: Config,
-        max_retry: int = 2,
         **kwargs: Any,
     ) -> None:
         super().__init__("search", self._search_worker, **kwargs)
@@ -287,13 +313,10 @@ class SearchStage(PipelineStage):
         self.rate_limiter = rate_limiter
         self.result_manager = result_manager
         self.config = config
-        self.max_retry = max_retry
         self.logger = get_search_logger()
 
-        # Work state tracking for precise completion detection
-        self.active_workers = 0  # Number of workers currently processing tasks
-        self.generating_tasks = False  # Whether any worker is generating new tasks
-        self.work_lock = threading.Lock()  # Protects work state variables
+        # Whether any worker is generating new tasks
+        self.generating_tasks = False
 
     def is_likely_finished(self) -> bool:
         """Fast lockless check for completion (may have slight inaccuracy but safe for pre-filtering)"""
@@ -312,15 +335,15 @@ class SearchStage(PipelineStage):
         """Generate unique task identifier for deduplication"""
         return f"search:{task.provider}:{getattr(task, 'query', '')}:{getattr(task, 'page', 1)}:{getattr(task, 'regex', '')}"
 
-    def process_task(self, task: ProviderTask) -> Optional[models.SearchTaskResult]:
+    def process_task(self, task: ProviderTask) -> Tuple[bool, Optional[models.SearchTaskResult]]:
         """Process search task"""
         if not isinstance(task, SearchTask):
-            self.logger.error(f"Invalid task type for search stage: {type(task)}")
-            return None
+            self.logger.error(f"[{self.name}] invalid task type: {type(task)}")
+            return False, None
 
         return self._search_worker(task)
 
-    def _search_worker(self, task: SearchTask) -> models.SearchTaskResult:
+    def _search_worker(self, task: SearchTask) -> Tuple[bool, models.SearchTaskResult]:
         """Optimized search worker using single network request per search"""
         try:
             # Execute search based on page number
@@ -341,7 +364,11 @@ class SearchStage(PipelineStage):
                     self.check_stage.put_task(check_task)
 
                 if keys:
-                    self.logger.info(f"Extracted {len(keys)} keys directly from search content")
+                    self.logger.info(
+                        f"[{self.name}] extracted {len(keys)} keys directly from search content, provider: {task.provider}"
+                    )
+            elif not content:
+                return True, task
 
             # Create collect tasks for links
             if results:
@@ -360,29 +387,20 @@ class SearchStage(PipelineStage):
 
             data.keys_extracted = len(keys)
 
-            # Process failed, retry if possible
-            if not content and task.attempts < self.max_retry:
-                task.attempts += 1
-                self.put_task(task)
-
-                self.logger.info(
-                    f"Retrying search task due to failed, provider: {task.provider}, query: {task.query}, page:{task.page}"
-                )
-
             self.logger.info(
-                f"Search completed for {task.provider}: {len(results) if results else 0} links, {len(keys)} keys"
+                f"[{self.name}] search completed for {task.provider}: {len(results) if results else 0} links, {len(keys)} keys"
             )
 
-            return data
+            return False, data
 
         except Exception as e:
-            self.logger.error(f"Search worker error: {e}")
-            raise
+            self.logger.error(f"[{self.name}] occur error, provider: {task.provider}, task: {task}, message: {e}")
+            return True, task
 
     def _execute_first_page_search(self, task: SearchTask) -> Tuple[List[str], str, int]:
         """Execute first page search and get total count in single request"""
         # Apply rate limiting
-        self._apply_rate_limit()
+        self._apply_rate_limit(task.use_api)
 
         # Get config and select auth method based on use_api
         auth_token = self.config.global_config.token if task.use_api else self.config.global_config.session
@@ -410,7 +428,7 @@ class SearchStage(PipelineStage):
     def _execute_page_search(self, task: SearchTask) -> Tuple[List[str], str]:
         """Execute subsequent page search in single request"""
         # Apply rate limiting
-        self._apply_rate_limit()
+        self._apply_rate_limit(task.use_api)
 
         # Get config and select auth method based on use_api
         auth_token = self.config.global_config.token if task.use_api else self.config.global_config.session
@@ -426,15 +444,17 @@ class SearchStage(PipelineStage):
 
         return results, content
 
-    def _apply_rate_limit(self) -> bool:
+    def _apply_rate_limit(self, use_api: bool) -> bool:
         """Apply rate limiting for GitHub requests"""
-        service_type = constants.SERVICE_TYPE_GITHUB_API
+        service_type = constants.SERVICE_TYPE_GITHUB_API if use_api else constants.SERVICE_TYPE_GITHUB_WEB
         if not self.rate_limiter.acquire(service_type):
             wait_time = self.rate_limiter.wait_time(service_type)
             if wait_time > 0:
                 time.sleep(wait_time)
                 if not self.rate_limiter.acquire(service_type):
-                    self.logger.warning(f"Rate limit exceeded for {service_type}")
+                    self.logger.warning(
+                        f'[{self.name}] rate limit exceeded for Github {"Rest API" if use_api else "Web"}'
+                    )
                     return False
         return True
 
@@ -453,11 +473,13 @@ class SearchStage(PipelineStage):
             for query in queries:
                 if not query:
                     self.logger.warning(
-                        f"Skip to add to task queue due to refined query is empty for query: {task.query}"
+                        f"[{self.name}] skip to add to task queue due to refined query is empty for query: {task.query}, provider: {task.provider}"
                     )
                     continue
                 elif query == task.query:
-                    self.logger.warning(f"Discard due to refined query is the same as original query: {query}")
+                    self.logger.warning(
+                        f"[{self.name}] discard due to refined query is the same as original query: {query}, provider: {task.provider}"
+                    )
                     continue
 
                 item = SearchTask(
@@ -473,14 +495,18 @@ class SearchStage(PipelineStage):
 
                 self.put_task(item)
 
-            self.logger.info(f"Generated {len(queries)} refined tasks for query: {task.query}")
+            self.logger.info(
+                f"[{self.name}] generated {len(queries)} refined tasks for provider: {task.provider}, query: {task.query}"
+            )
 
         # If needs pagination and not refining
         elif total > per_page:
             page_tasks = self._generate_page_tasks(task, total, per_page)
             for page_task in page_tasks:
                 self.put_task(page_task)
-            self.logger.info(f"Generated {len(page_tasks)} page tasks for query: {task.query}")
+            self.logger.info(
+                f"[{self.name}] generated {len(page_tasks)} page tasks for provider: {task.provider}, query: {task.query}"
+            )
 
     def _generate_page_tasks(self, task: SearchTask, total: int, per_page: int) -> List[SearchTask]:
         """Generate pagination tasks"""
@@ -506,56 +532,7 @@ class SearchStage(PipelineStage):
 
         return page_tasks
 
-    def _worker_loop(self):
-        """Enhanced worker loop with work state tracking"""
-        while self.running:
-            try:
-                # Get task with timeout
-                task = self.task_queue.get(timeout=1.0)
-
-                # Mark worker as active
-                with self.work_lock:
-                    self.active_workers += 1
-
-                # Update activity time
-                with self.stats_lock:
-                    self.last_activity = time.time()
-
-                try:
-                    # Process task
-                    result = self.process_task(task)
-
-                    # Update success statistics
-                    with self.stats_lock:
-                        self.total_processed += 1
-
-                    # Handle result and generate new tasks if needed
-                    if result:
-                        self._handle_result_with_task_generation(task, result)
-
-                except Exception as e:
-                    self.logger.error(f"Error processing task in {self.name}: {e}")
-
-                    # Update error statistics
-                    with self.stats_lock:
-                        self.total_errors += 1
-                        self.total_processed += 1
-
-                finally:
-                    # Mark worker as inactive
-                    with self.work_lock:
-                        self.active_workers -= 1
-
-                    # Mark task as done
-                    self.task_queue.task_done()
-
-            except queue.Empty:
-                # Timeout waiting for task, continue loop
-                continue
-            except Exception as e:
-                self.logger.error(f"Worker error in {self.name}: {e}")
-
-    def _handle_result_with_task_generation(self, task: SearchTask, result: models.SearchTaskResult) -> None:
+    def _handle_result(self, task: SearchTask, result: models.SearchTaskResult) -> None:
         """Handle task result and generate new tasks with proper state tracking"""
         # Check if this is a first page task that might generate new tasks
         if task.page == 1 and result.total > 0:
@@ -597,15 +574,15 @@ class CollectStage(PipelineStage):
         """Generate unique task identifier for deduplication"""
         return f"collect:{task.provider}:{getattr(task, 'url', '')}"
 
-    def process_task(self, task: ProviderTask) -> Optional[models.CollectTaskResult]:
+    def process_task(self, task: ProviderTask) -> Tuple[bool, Optional[models.CollectTaskResult]]:
         """Process collect task"""
         if not isinstance(task, CollectTask):
-            self.logger.error(f"Invalid task type for collect stage: {type(task)}")
-            return None
+            self.logger.error(f"[{self.name}] invalid task type: {type(task)}")
+            return False, None
 
         return self._collect_worker(task)
 
-    def _collect_worker(self, task: CollectTask) -> Optional[models.CollectTaskResult]:
+    def _collect_worker(self, task: CollectTask) -> Tuple[bool, Optional[models.CollectTaskResult]]:
         """Collect worker implementation with advanced collection"""
         try:
             # Execute collection using global collect function
@@ -630,11 +607,11 @@ class CollectStage(PipelineStage):
             # Save the processed link
             self.result_manager.add_links(task.provider, [task.url])
 
-            return models.CollectTaskResult(services=services)
+            return False, models.CollectTaskResult(services=services)
 
         except Exception as e:
-            self.logger.error(f"Collect error for {task.provider}: {e}")
-            return None
+            self.logger.error(f"[{self.name}] occur error for provider: {task.provider}, task: {task}, message: {e}")
+            return True, task
 
 
 class CheckStage(PipelineStage):
@@ -660,34 +637,35 @@ class CheckStage(PipelineStage):
         service = getattr(task, "service", None)
         if service:
             return f"check:{task.provider}:{service.key}:{service.address}:{service.endpoint}"
+
         return f"check:{task.provider}:unknown"
 
-    def process_task(self, task: ProviderTask) -> Optional[models.CheckTaskResult]:
+    def process_task(self, task: ProviderTask) -> Tuple[bool, Optional[models.CheckTaskResult]]:
         """Process check task"""
         if not isinstance(task, CheckTask):
-            self.logger.error(f"Invalid task type for check stage: {type(task)}")
-            return None
+            self.logger.error(f"[{self.name}] invalid task type: {type(task)}")
+            return False, None
 
         return self._check_worker(task)
 
-    def _check_worker(self, task: CheckTask) -> Optional[models.CheckTaskResult]:
+    def _check_worker(self, task: CheckTask) -> Tuple[bool, Optional[models.CheckTaskResult]]:
         """Check worker implementation"""
         try:
             # Get provider instance
             provider = self.providers.get(task.provider)
             if not provider:
-                self.logger.error(f"Unknown provider: {task.provider}")
-                return None
+                self.logger.error(f"[{self.name}] unknown provider: {task.provider}")
+                return False, None
 
             # Apply rate limiting
-            service_type = f"{constants.PROVIDER_SERVICE_PREFIX}{task.provider}"
+            service_type = Pipeline.get_service_name(task.provider)
             if not self.rate_limiter.acquire(service_type):
                 wait_time = self.rate_limiter.wait_time(service_type)
                 if wait_time > 0:
                     time.sleep(wait_time)
                     if not self.rate_limiter.acquire(service_type):
-                        self.logger.warning(f"Rate limit exceeded for {service_type}")
-                        return None
+                        self.logger.warning(f"[{self.name}] rate limit exceeded for provider: {task.provider}")
+                        return True, task
 
             # Execute check
             result = provider.check(
@@ -708,7 +686,7 @@ class CheckStage(PipelineStage):
 
                 # Save as valid key
                 self.result_manager.add_result(task.provider, constants.RESULT_CATEGORY_VALID_KEYS, [task.service])
-                return models.CheckTaskResult(valid_keys=[task.service])
+                return False, models.CheckTaskResult(valid_keys=[task.service])
 
             else:
                 # Categorize based on error reason
@@ -716,7 +694,7 @@ class CheckStage(PipelineStage):
                     self.result_manager.add_result(
                         task.provider, constants.RESULT_CATEGORY_NO_QUOTA_KEYS, [task.service]
                     )
-                    return models.CheckTaskResult(no_quota_keys=[task.service])
+                    return False, models.CheckTaskResult(no_quota_keys=[task.service])
 
                 elif result.reason in [
                     models.ErrorReason.RATE_LIMITED,
@@ -726,19 +704,20 @@ class CheckStage(PipelineStage):
                     self.result_manager.add_result(
                         task.provider, constants.RESULT_CATEGORY_WAIT_CHECK_KEYS, [task.service]
                     )
-                    return models.CheckTaskResult(wait_check_keys=[task.service])
+                    return False, models.CheckTaskResult(wait_check_keys=[task.service])
 
                 else:
                     self.result_manager.add_result(
                         task.provider, constants.RESULT_CATEGORY_INVALID_KEYS, [task.service]
                     )
-                    return models.CheckTaskResult(invalid_keys=[task.service])
+                    return False, models.CheckTaskResult(invalid_keys=[task.service])
 
         except Exception as e:
             # Report rate limit failure
-            self.rate_limiter.report_result(f"{constants.PROVIDER_SERVICE_PREFIX}{task.provider}", False)
-            self.logger.error(f"Check error for {task.provider}: {e}")
-            return None
+            self.rate_limiter.report_result(Pipeline.get_service_name(task.provider), False)
+            self.logger.error(f"[{self.name}] occur error for provider: {task.provider}, task: {task}, message: {e}")
+
+            return True, task
 
 
 class ModelsStage(PipelineStage):
@@ -755,24 +734,25 @@ class ModelsStage(PipelineStage):
         service = getattr(task, "service", None)
         if service:
             return f"models:{task.provider}:{service.key}:{service.address}"
+
         return f"models:{task.provider}:unknown"
 
-    def process_task(self, task: ProviderTask) -> Optional[models.ModelsTaskResult]:
+    def process_task(self, task: ProviderTask) -> Tuple[bool, Optional[models.ModelsTaskResult]]:
         """Process models task"""
         if not isinstance(task, ModelsTask):
-            self.logger.error(f"Invalid task type for models stage: {type(task)}")
-            return None
+            self.logger.error(f"[{self.name}] invalid task type: {type(task)}")
+            return False, None
 
         return self._models_worker(task)
 
-    def _models_worker(self, task: ModelsTask) -> Optional[models.ModelsTaskResult]:
+    def _models_worker(self, task: ModelsTask) -> Tuple[bool, Optional[models.ModelsTaskResult]]:
         """Models worker implementation"""
         try:
             # Get provider instance
             provider = self.providers.get(task.provider)
             if not provider:
-                self.logger.error(f"Unknown provider: {task.provider}")
-                return None
+                self.logger.error(f"[{self.name}] unknown provider: {task.provider}")
+                return False, None
 
             # Get model list
             model_list = provider.list_models(
@@ -783,11 +763,11 @@ class ModelsStage(PipelineStage):
             if model_list:
                 self.result_manager.add_models(task.provider, task.service.key, model_list)
 
-            return models.ModelsTaskResult(models=model_list)
+            return False, models.ModelsTaskResult(models=model_list)
 
         except Exception as e:
-            self.logger.error(f"Models error for {task.provider}: {e}")
-            return None
+            self.logger.error(f"[{self.name}] list models error, provider: {task.provider}, task: {task}, message: {e}")
+            return True, task
 
 
 class Pipeline:
@@ -837,6 +817,7 @@ class Pipeline:
             providers=self.providers,
             thread_count=thread_config.get("models", 2),
             queue_size=queue_config.get("models", constants.DEFAULT_MODELS_QUEUE_SIZE),
+            max_retries_requeued=self.config.global_config.max_retries_requeued,
         )
 
         self.check_stage = CheckStage(
@@ -846,6 +827,7 @@ class Pipeline:
             providers=self.providers,
             thread_count=thread_config.get("check", 8),
             queue_size=queue_config.get("check", constants.DEFAULT_CHECK_QUEUE_SIZE),
+            max_retries_requeued=self.config.global_config.max_retries_requeued,
         )
 
         self.collect_stage = CollectStage(
@@ -853,6 +835,7 @@ class Pipeline:
             result_manager=self.result_manager,
             thread_count=thread_config.get("collect", 4),
             queue_size=queue_config.get("collect", constants.DEFAULT_COLLECT_QUEUE_SIZE),
+            max_retries_requeued=self.config.global_config.max_retries_requeued,
         )
 
         self.search_stage = SearchStage(
@@ -861,9 +844,9 @@ class Pipeline:
             rate_limiter=self.rate_limiter,
             result_manager=self.result_manager,
             config=self.config,
-            max_retry=self.config.global_config.max_retry,
             thread_count=thread_config.get("search", 2),
             queue_size=queue_config.get("search", constants.DEFAULT_SEARCH_QUEUE_SIZE),
+            max_retries_requeued=self.config.global_config.max_retries_requeued,
         )
 
         # Set upstream relationships
@@ -1027,3 +1010,11 @@ class Pipeline:
 
         self.completion_check_running = False
         pipeline_logger.info("Pipeline completion monitoring finished")
+
+    @staticmethod
+    def get_service_name(provider: str) -> str:
+        name = utils.trim(provider)
+        if not name:
+            return ""
+
+        return f"{constants.PROVIDER_SERVICE_PREFIX}:{name}"

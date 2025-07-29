@@ -74,7 +74,7 @@ DEFAULT_QUEUE_SIZE_THRESHOLD_APP: int = 1000
 # Service type constants
 SERVICE_TYPE_GITHUB_API: str = "github_api"
 SERVICE_TYPE_GITHUB_WEB: str = "github_web"
-PROVIDER_SERVICE_PREFIX: str = "provider "
+PROVIDER_SERVICE_PREFIX: str = "provider"
 
 # Queue state constants
 QUEUE_STATE_PROVIDER_MULTI: str = "multi"
@@ -281,5 +281,5 @@ RESULT_CATEGORY_WAIT_CHECK_KEYS: str = "wait_check_keys"
 # Github code search syntax
 ALLOWED_OPERATORS: Set[str] = set(["AND", "OR", "NOT", "AND NOT"])
 
-# Maximum number of retries for failed requests
-DEFAULT_MAX_RETRY: int = 3
+# Maximum number of times to re-queue when processing fails
+DEFAULT_MAX_RETRIES_REQUEUED: int = 3

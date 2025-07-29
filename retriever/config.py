@@ -89,7 +89,7 @@ class GlobalConfig:
     workspace: str = constants.DEFAULT_WORKSPACE_DIR
     session: str = ""  # GitHub session for web search
     token: str = ""  # GitHub token for API search
-    max_retry: int = 2  #  Maximum number of retries for failed requests
+    max_retries_requeued: int = 2  #  Maximum number of retries for failed requests
 
 
 @dataclass
@@ -180,7 +180,7 @@ class ConfigParser:
                 workspace=os.path.abspath(global_data.get("workspace", "./workspace")),
                 session=global_data.get("session", ""),
                 token=global_data.get("token", ""),
-                max_retry=global_data.get("max_retry", constants.DEFAULT_MAX_RETRY),
+                max_retries_requeued=global_data.get("max_retries_requeued", constants.DEFAULT_MAX_RETRIES_REQUEUED),
             )
 
         # Parse pipeline configuration

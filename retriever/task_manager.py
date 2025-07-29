@@ -215,7 +215,7 @@ class TaskManager:
 
         for task_config in self.config.tasks:
             if task_config.enabled:
-                service_name = f"{constants.PROVIDER_SERVICE_PREFIX}{task_config.name}"
+                service_name = Pipeline.get_service_name(task_config.name)
                 rate_limits[service_name] = task_config.rate_limit
 
         # Update config with provider rate limits
