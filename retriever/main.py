@@ -21,8 +21,9 @@ from constants import (
     LOG_LEVEL_INFO,
     LOG_LEVEL_WARNING,
 )
-from logger import flush_logs, get_logging_stats, get_main_logger, init_logging
 from task_manager import TaskManager, create_task_manager
+
+from logger import flush_logs, get_logging_stats, get_main_logger, init_logging
 
 # Get main program logger
 logger = get_main_logger()
@@ -55,7 +56,7 @@ def signal_handler(signum: int, frame: Any) -> None:
     sys.exit(0)
 
 
-def print_stats(manager: TaskManager, interval: int = 10) -> None:
+def print_stats(manager: TaskManager) -> None:
     """Print periodic statistics"""
     try:
         stats = manager.get_stats()
@@ -137,7 +138,7 @@ def run_pipeline(config_file: str, log_level: str, stats_interval: int) -> None:
 
             # Print stats periodically
             if current_time - last_stats_time >= stats_interval:
-                print_stats(manager, stats_interval)
+                print_stats(manager)
                 last_stats_time = current_time
 
             # Check if processing is complete

@@ -35,7 +35,6 @@ from constants import (
     STAGE_NAME_SEARCH,
 )
 from load_balancer import LoadBalancer, create_load_balancer
-from logger import get_application_logger, init_logging
 from models import (
     ApplicationStatus,
     LoadBalancerConfig,
@@ -46,6 +45,8 @@ from models import (
 )
 from monitoring import MonitoringSystem, create_monitoring_system
 from task_manager import TaskManager, create_task_manager
+
+from logger import get_application_logger, init_logging
 
 # Get application logger
 logger = get_application_logger()

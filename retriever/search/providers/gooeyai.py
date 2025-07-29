@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 from constants import USER_AGENT
 from models import CheckResult, Condition, ErrorReason
+
 from utils import trim
 
 from ..client import chat

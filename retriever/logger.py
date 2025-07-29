@@ -616,4 +616,3 @@ if __name__ == "__main__":
             print(f"    Modified: {info['modified']}")
         else:
             print(f"  - {filename} (Error: {info['error']})")
-            print(f"  - {filename} (Error: {info['error']})")

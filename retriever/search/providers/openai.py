@@ -8,6 +8,7 @@ OpenAI provider implementation.
 from typing import List
 
 from models import Condition
+
 from utils import trim
 
 from .openai_like import OpenAILikeProvider

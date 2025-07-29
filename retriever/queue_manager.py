@@ -22,9 +22,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 
 import constants
-from logger import get_queue_manager_logger
 from result_manager import AtomicFileWriter
 from task import ProviderTask, TaskFactory
+
+from logger import get_queue_manager_logger
 
 # Get queue manager logger
 logger = get_queue_manager_logger()

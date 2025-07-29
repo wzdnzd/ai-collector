@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 
 from constants import DEFAULT_QUESTION
 from models import CheckResult, Condition, ErrorReason
+
 from utils import trim
 
 from ..client import chat, http_get

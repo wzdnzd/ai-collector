@@ -11,10 +11,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-import yaml
-
 import constants
 import models
+import yaml
+
 from logger import get_config_logger
 
 # Get configuration module logger
@@ -75,6 +75,7 @@ class TaskConfig:
     provider_type: str = ""
     use_api: bool = False
     skip_search: bool = False
+    extras: Dict[str, Any] = field(default_factory=dict)
     api: ApiConfig = field(default_factory=ApiConfig)
     patterns: Patterns = field(default_factory=Patterns)
     conditions: List[Dict[str, str]] = field(default_factory=list)
@@ -235,6 +236,7 @@ class ConfigParser:
         task.provider_type = task_data.get("provider_type", "")
         task.use_api = task_data.get("use_api", False)
         task.skip_search = task_data.get("skip_search", False)
+        task.extras = task_data.get("extras", {})
 
         # Parse API configuration
         if "api" in task_data:
@@ -298,9 +300,6 @@ class ConfigParser:
         if not self.config:
             raise ValueError("Configuration is None")
 
-        if not self.config.global_config.session and not self.config.global_config.token:
-            raise ValueError("Either GitHub session or token is required in global config")
-
         if not self.config.tasks:
             raise ValueError("At least one task must be configured")
 
@@ -317,6 +316,9 @@ class ConfigParser:
                     f"Valid types: {valid_types}"
                 )
 
+            if not task.skip_search and not self.config.global_config.session and not self.config.global_config.token:
+                raise ValueError("Either GitHub session or token is required in global config")
+
         # Validate task names are unique
         names = [t.name for t in self.config.tasks if t.enabled]
         if len(names) != len(set(names)):
@@ -326,17 +328,18 @@ class ConfigParser:
         """Create a default configuration file"""
         default_config = {
             "global": {
-                "workspace": "./workspace",
+                "workspace": constants.DEFAULT_WORKSPACE_DIR,
                 "session": "your_github_session_here",
                 "token": "your_github_token_here",
+                "max_retry": constants.DEFAULT_MAX_RETRY,
             },
-            "pipeline": {"threads": {"search": 2, "collect": 4, "check": 8, "models": 2}},
+            "pipeline": {"threads": constants.DEFAULT_THREAD_COUNTS.copy()},
             "persistence": {
-                "batch_size": 50,
-                "save_interval": 30,
-                "queue_interval": 60,
+                "batch_size": constants.DEFAULT_BATCH_SIZE,
+                "save_interval": constants.DEFAULT_SAVE_INTERVAL,
+                "queue_interval": constants.DEFAULT_QUEUE_INTERVAL,
                 "auto_restore": True,
-                "shutdown_timeout": 30,
+                "shutdown_timeout": constants.DEFAULT_SHUTDOWN_TIMEOUT,
             },
             "rate_limits": {
                 constants.SERVICE_TYPE_GITHUB_API: {"rate": 0.15, "burst": 3, "adaptive": True},  # ~9 RPM, conservative

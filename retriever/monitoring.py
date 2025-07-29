@@ -13,8 +13,9 @@ from collections import deque
 from typing import Any, Callable, Dict, List, Optional
 
 from constants import ALERT_COOLDOWN_SECONDS
-from logger import get_monitoring_logger
 from models import MonitoringConfig, PipelineStats, ProviderStats
+
+from logger import get_monitoring_logger
 
 # Get monitoring logger
 logger = get_monitoring_logger()

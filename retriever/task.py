@@ -13,8 +13,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Type
 
 from constants import PATTERN_ADDRESS, PATTERN_ENDPOINT, PATTERN_KEY, PATTERN_MODEL
-from logger import get_task_manager_logger
 from models import Service
+
+from logger import get_task_manager_logger
 
 # Get task manager logger
 logger = get_task_manager_logger()

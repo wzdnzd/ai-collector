@@ -9,6 +9,7 @@ import urllib.parse
 from typing import List
 
 from models import CheckResult, Condition, ErrorReason
+
 from utils import trim
 
 from ..client import chat

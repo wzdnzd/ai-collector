@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 
 from constants import DEFAULT_COMPLETION_PATH, DEFAULT_MODEL_PATH, USER_AGENT
 from models import CheckResult, Condition, ErrorReason
+
 from utils import trim
 
 from ..client import http_get

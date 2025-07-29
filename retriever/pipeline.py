@@ -16,13 +16,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import constants
 import models
 from config import Config
-from logger import (
-    get_check_logger,
-    get_collect_logger,
-    get_models_logger,
-    get_pipeline_logger,
-    get_search_logger,
-)
 from queue_manager import QueueManager
 from rate_limiter import RateLimiter
 from refine import RefineEngine
@@ -35,6 +28,14 @@ from task import (
     ProviderTask,
     SearchTask,
     TaskFactory,
+)
+
+from logger import (
+    get_check_logger,
+    get_collect_logger,
+    get_models_logger,
+    get_pipeline_logger,
+    get_search_logger,
 )
 
 # Get pipeline logger

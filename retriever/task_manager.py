@@ -13,11 +13,12 @@ from typing import Any, Dict, List, Optional
 
 import constants
 import search
-from config import Config, ConfigParser, load_config
-from logger import get_task_manager_logger
+from config import Config, ConfigParser, TaskConfig, load_config
 from models import Condition, ProviderPatterns, TaskManagerStats, TaskRecoveryInfo
-from pipeline import Pipeline
 from task import ProviderTask, SearchTask, TaskFactory
+
+from logger import get_task_manager_logger
+from pipeline import Pipeline
 
 # Get task manager logger
 logger = get_task_manager_logger()
@@ -27,15 +28,16 @@ class ProviderFactory:
     """Factory for creating provider instances from configuration"""
 
     @staticmethod
-    def create_provider(task_config: Any, conditions: List[Condition]) -> search.Provider:
+    def create_provider(task_config: TaskConfig, conditions: List[Condition]) -> search.Provider:
         """Create provider instance based on configuration"""
         provider_type = task_config.provider_type
         name = task_config.name
         api_config = task_config.api
         skip_search = task_config.skip_search
+        extras = task_config.extras
 
         if provider_type == constants.PROVIDER_TYPE_OPENAI_LIKE:
-            return ProviderFactory._create_openai_like(name, api_config, conditions, skip_search)
+            return ProviderFactory._create_openai_like(name, api_config, conditions, skip_search, **(extras or {}))
 
         elif provider_type == constants.PROVIDER_TYPE_ANTHROPIC:
             return ProviderFactory._create_anthropic(api_config, conditions, skip_search)
@@ -57,7 +59,11 @@ class ProviderFactory:
 
     @staticmethod
     def _create_openai_like(
-        name: str, api_config: Any, conditions: List[Condition], skip_search: bool
+        name: str,
+        api_config: Any,
+        conditions: List[Condition],
+        skip_search: bool,
+        **kwargs,
     ) -> search.OpenAILikeProvider:
         """Create OpenAI-compatible provider"""
         # Handle special cases
@@ -80,7 +86,8 @@ class ProviderFactory:
             )
         else:
             # Generic OpenAI-like provider
-            kwargs = {}
+            if not kwargs:
+                kwargs = {}
             if api_config.auth_key != "Authorization":
                 kwargs["auth_key"] = api_config.auth_key
 

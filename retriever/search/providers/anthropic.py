@@ -18,8 +18,9 @@ from typing import Dict, List, Optional
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from constants import CTX, NO_RETRY_ERROR_CODES, USER_AGENT
-from logger import get_provider_logger
 from models import CheckResult, Condition, ErrorReason
+
+from logger import get_provider_logger
 from utils import trim
 
 from .base import Provider

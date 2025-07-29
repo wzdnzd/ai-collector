@@ -11,9 +11,12 @@ import sys
 import urllib.parse
 from typing import Dict, List, Optional, Union
 
+import utils
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from logger import get_provider_logger
 from models import CheckResult, Condition, ErrorReason
+
+from logger import get_provider_logger
 from utils import trim
 
 from ..client import chat
@@ -53,8 +56,12 @@ class Provider(object):
         # provider name
         self.name = name
 
+        directory = ""
+        if kwargs:
+            directory = utils.trim(kwargs.get("directory", ""))
+
         # directory
-        self.directory = re.sub(r"[^a-zA-Z0-9_\-]", "-", name, flags=re.I).lower()
+        self.directory = os.path.join(directory, re.sub(r"[^a-zA-Z0-9_\-]", "-", name, flags=re.I).lower())
 
         # filename for valid keys
         self.keys_filename = "valid-keys.txt"

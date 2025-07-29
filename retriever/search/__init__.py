@@ -10,7 +10,6 @@ from .providers import *
 
 __all__ = [
     # Core classes
-    "SearchEngine",
     "TimeInterval",
     "ErrorReason",
     "KeyDetail",

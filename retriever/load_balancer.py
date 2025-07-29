@@ -26,8 +26,9 @@ from constants import (
     STAGE_NAME_MODELS,
     STAGE_NAME_SEARCH,
 )
-from logger import get_load_balancer_logger
 from models import LoadBalancerConfig
+
+from logger import get_load_balancer_logger
 
 # Get load balancer logger
 logger = get_load_balancer_logger()

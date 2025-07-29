@@ -20,6 +20,7 @@ import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
 
 from models import Service
+
 from utils import encoding_url, isblank, trim
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

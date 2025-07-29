@@ -17,8 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import models
-from logger import get_result_manager_logger
 from models import ResultStats
+
+from logger import get_result_manager_logger
 
 # Get result manager logger
 logger = get_result_manager_logger()
