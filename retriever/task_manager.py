@@ -457,6 +457,9 @@ class TaskManager:
 def create_task_manager(config_file: str = constants.DEFAULT_CONFIG_FILE) -> TaskManager:
     """Factory function to create task manager from configuration"""
     config = load_config(config_file)
+    if not config:
+        return None
+
     return TaskManager(config)
 
 

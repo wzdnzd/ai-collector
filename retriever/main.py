@@ -118,6 +118,8 @@ def run_pipeline(config_file: str, log_level: str, stats_interval: int) -> None:
         # Create and start task manager
         logger.info(f"Loading configuration from: {config_file}")
         manager = create_task_manager(config_file)
+        if not manager:
+            return
 
         logger.info(f"Initialized with {len(manager.providers)} providers:")
         for provider_name in manager.providers.keys():

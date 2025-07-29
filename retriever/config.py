@@ -167,7 +167,7 @@ class ConfigParser:
 
         except Exception as e:
             logger.error(f"Failed to load config file {self.config_file}: {e}")
-            raise
+            return None
 
     def _parse_config(self, data: Dict[str, Any]) -> Config:
         """Parse YAML data into Config object"""
