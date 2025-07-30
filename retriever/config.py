@@ -26,9 +26,11 @@ class ProviderType(Enum):
 
     OPENAI_LIKE = constants.PROVIDER_TYPE_OPENAI_LIKE  # OpenAI compatible APIs (OpenAI, Azure, Doubao, QianFan)
     ANTHROPIC = constants.PROVIDER_TYPE_ANTHROPIC  # Anthropic Claude API
+    BEDROCK = constants.PROVIDER_TYPE_BEDROCK  # AWS Bedrock API
     GEMINI = constants.PROVIDER_TYPE_GEMINI  # Google Gemini API
     GOOEY_AI = constants.PROVIDER_TYPE_GOOEY_AI  # GooeyAI API
     STABILITY_AI = constants.PROVIDER_TYPE_STABILITY_AI  # StabilityAI API
+    VERTEX = constants.PROVIDER_TYPE_VERTEX  # Google Vertex AI API
     CUSTOM = constants.PROVIDER_TYPE_CUSTOM  # Custom API implementation
 
 

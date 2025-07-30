@@ -34,9 +34,11 @@ DEFAULT_SHUTDOWN_TIMEOUT: float = 30.0
 # Provider types
 PROVIDER_TYPE_OPENAI_LIKE: str = "openai_like"
 PROVIDER_TYPE_ANTHROPIC: str = "anthropic"
+PROVIDER_TYPE_BEDROCK: str = "bedrock"
 PROVIDER_TYPE_GEMINI: str = "gemini"
 PROVIDER_TYPE_GOOEY_AI: str = "gooey_ai"
 PROVIDER_TYPE_STABILITY_AI: str = "stability_ai"
+PROVIDER_TYPE_VERTEX: str = "vertex"
 PROVIDER_TYPE_CUSTOM: str = "custom"
 
 # Default configuration values

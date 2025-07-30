@@ -42,6 +42,9 @@ class ProviderFactory:
         elif provider_type == constants.PROVIDER_TYPE_ANTHROPIC:
             return ProviderFactory._create_anthropic(api_config, conditions, skip_search)
 
+        elif provider_type == constants.PROVIDER_TYPE_BEDROCK:
+            return ProviderFactory._create_bedrock(api_config, conditions, skip_search)
+
         elif provider_type == constants.PROVIDER_TYPE_GEMINI:
             return ProviderFactory._create_gemini(api_config, conditions, skip_search)
 
@@ -50,6 +53,9 @@ class ProviderFactory:
 
         elif provider_type == constants.PROVIDER_TYPE_STABILITY_AI:
             return ProviderFactory._create_stability_ai(api_config, conditions, skip_search)
+
+        elif provider_type == constants.PROVIDER_TYPE_VERTEX:
+            return ProviderFactory._create_vertex(api_config, conditions, skip_search)
 
         elif provider_type == constants.PROVIDER_TYPE_CUSTOM:
             return ProviderFactory._create_custom(name, api_config, conditions, skip_search)
@@ -110,6 +116,13 @@ class ProviderFactory:
         )
 
     @staticmethod
+    def _create_bedrock(api_config: Any, conditions: List[Condition], skip_search: bool) -> search.BedrockProvider:
+        """Create AWS Bedrock provider"""
+        return search.BedrockProvider(
+            conditions=conditions, default_model=api_config.default_model, skip_search=skip_search
+        )
+
+    @staticmethod
     def _create_gemini(api_config: Any, conditions: List[Condition], skip_search: bool) -> search.GeminiProvider:
         """Create Gemini provider"""
         return search.GeminiProvider(
@@ -129,6 +142,13 @@ class ProviderFactory:
     ) -> search.StabilityAIProvider:
         """Create StabilityAI provider"""
         return search.StabilityAIProvider(
+            conditions=conditions, default_model=api_config.default_model, skip_search=skip_search
+        )
+
+    @staticmethod
+    def _create_vertex(api_config: Any, conditions: List[Condition], skip_search: bool) -> search.VertexProvider:
+        """Create Vertex AI provider"""
+        return search.VertexProvider(
             conditions=conditions, default_model=api_config.default_model, skip_search=skip_search
         )
 
