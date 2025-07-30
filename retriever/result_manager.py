@@ -186,7 +186,7 @@ class ResultManager:
     def add_result(self, result_type: str, data: Any):
         """Add result to appropriate buffer"""
         if result_type not in self.buffers:
-            logger.warning(f"Unknown result type: {result_type}")
+            logger.warning(f"[persist] unknown result type: {result_type}")
             return
 
         # Handle different data types
@@ -223,7 +223,7 @@ class ResultManager:
         if needs_flush:
             self._flush_buffer(result_type)
 
-        logger.debug(f"Added {len(items)} {result_type} for {self.name}")
+        logger.debug(f"[persist] added {len(items)} {result_type} for {self.name}")
 
     def add_links(self, links: List[str]):
         """Convenience method for adding links with validation"""
@@ -235,7 +235,7 @@ class ResultManager:
 
         if valid_links:
             self.add_result("links", valid_links)
-            logger.debug(f"Added {len(valid_links)} links for {self.name}")
+            logger.debug(f"[persist] added {len(valid_links)} links for {self.name}")
 
     def add_models(self, key: str, models: List[str]):
         """Add model list for a key (not buffered, saved immediately)"""
@@ -245,7 +245,7 @@ class ResultManager:
 
         # Save models data immediately
         self._save_models()
-        logger.debug(f"Added {len(models)} models for key in {self.name}")
+        logger.debug(f"[persist] added {len(models)} models for key in {self.name}")
 
     def flush_all(self):
         """Flush all buffers immediately"""
@@ -363,7 +363,7 @@ class ResultManager:
                         self._flush_buffer(result_type)
 
             except Exception as e:
-                logger.error(f"Error in periodic flush for {self.name}: {e}")
+                logger.error(f"[persist] error in periodic flush for {self.name}: {e}")
 
     def _flush_buffer(self, result_type: str):
         """Flush a specific buffer to file"""
@@ -392,10 +392,10 @@ class ResultManager:
             with self.lock:
                 self.stats.last_save = time.time()
 
-            logger.info(f"Saved {len(lines)} {result_type} for {self.name}")
+            logger.info(f"[persist] saved {len(lines)} {result_type} for {self.name}")
 
         except Exception as e:
-            logger.error(f"Failed to save {result_type} for {self.name}: {e}")
+            logger.error(f"[persist] failed to save {result_type} for {self.name}: {e}")
 
     def _save_models(self):
         """Save models data to JSON file"""
@@ -420,10 +420,10 @@ class ResultManager:
             content = json.dumps(summary, indent=2, ensure_ascii=False)
             AtomicFileWriter.write_atomic(filepath, content)
 
-            logger.debug(f"Saved models summary for {self.name}")
+            logger.debug(f"[persist] saved models summary for {self.name}")
 
         except Exception as e:
-            logger.error(f"Failed to save models for {self.name}: {e}")
+            logger.error(f"[persist] failed to save models for {self.name}: {e}")
 
 
 class MultiResultManager:

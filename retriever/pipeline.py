@@ -142,9 +142,10 @@ class PipelineStage(ABC):
         with self.dedup_lock:
             # Logic: attempts == 0 means it is a new task, but the same task has already been queued.
             if task_id in self.processed_tasks and (task.attempts == 0 or task.attempts > self.max_retries_requeued):
-                pipeline_logger.warning(
-                    f"[{self.name}] task has been processed or the maximum number of retries has been reached, discard: {task_id}"
-                )
+                if task.attempts > self.max_retries_requeued:
+                    pipeline_logger.warning(
+                        f"[{self.name}] task=[{task_id}] will be discarded because the maximum number of retries=[{self.max_retries_requeued}] has been reached"
+                    )
                 return False
 
         # Try to add to queue

@@ -122,7 +122,7 @@ class StabilityAIProvider(Provider):
                             message = e.reason
 
                         logger.error(
-                            f"[Chat] Failed to request URL: {url}, token: {token}, status code: {code}, message: {message}"
+                            f"[chat] failed to request URL: {url}, token: {token}, status code: {code}, message: {message}"
                         )
 
                     if code in NO_RETRY_ERROR_CODES:

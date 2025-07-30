@@ -237,7 +237,7 @@ def chat(
     """Make chat API request with retry logic."""
 
     def output(code: int, message: str, debug: bool = False) -> None:
-        text = f"[Chat] Failed to request URL: {url}, headers: {headers}, status code: {code}, message: {message}"
+        text = f"[chat] failed to request URL: {url}, headers: {headers}, status code: {code}, message: {message}"
         if debug:
             logger.debug(text)
         else:
@@ -245,18 +245,18 @@ def chat(
 
     url, model = trim(url), trim(model)
     if not url:
-        logger.error(f"[Chat] URL cannot be empty")
+        logger.error(f"[chat] url cannot be empty")
         return 400, None
 
     if not isinstance(headers, dict):
-        logger.error(f"[Chat] Headers must be a dict")
+        logger.error(f"[chat] headers must be a dict")
         return 400, None
     elif len(headers) == 0:
         headers["content-type"] = "application/json"
 
     if not params or not isinstance(params, dict):
         if not model:
-            logger.error(f"[Chat] Model cannot be empty")
+            logger.error(f"[chat] model cannot be empty")
             return 400, None
 
         params = {
@@ -398,7 +398,7 @@ def search_web_with_count(
         try:
             callback(results, content)
         except Exception as e:
-            logger.error(f"[Search] Callback failed: {e}")
+            logger.error(f"[search] callback failed: {e}")
 
     # Get total count (only for first page to avoid redundant calls)
     if page == 1:
@@ -514,7 +514,7 @@ def estimate_web_total(query: str, session: str, content: Optional[str] = None) 
 
         content = trim(content)
         if not content:
-            logger.warning(f"[Search] Initial search failed for query: {message}, using conservative estimate")
+            logger.warning(f"[search] initial search failed for query: {message}, using conservative estimate")
             # Conservative estimate
             return WEB_RESULTS_PER_PAGE
 
@@ -545,7 +545,7 @@ def estimate_web_total(query: str, session: str, content: Optional[str] = None) 
             if not data.get("failed", True):
                 count = data.get("count", 0)
                 mode = data.get("mode", "unknown")
-                logger.info(f"[Search] Got {count} results, mode: {mode}, query: {message}")
+                logger.info(f"[search] got {count} results, mode: {mode}, query: {message}")
 
                 # Return count if valid, otherwise try page extraction
                 return count if count > 0 else extract_count_from_page(content, query)
@@ -554,7 +554,7 @@ def estimate_web_total(query: str, session: str, content: Optional[str] = None) 
         return extract_count_from_page(content, query)
 
     except Exception as e:
-        logger.error(f"[Search] Estimation failed for query: {message}, error: {e}, using conservative estimate")
+        logger.error(f"[search] estimation failed for query: {message}, error: {e}, using conservative estimate")
         # Conservative estimate
         return WEB_RESULTS_PER_PAGE
 
@@ -580,15 +580,15 @@ def extract_count_from_page(content: str, query: str) -> int:
             if match:
                 text = match.group(1).replace(",", "")
                 count = int(text)
-                logger.info(f"[Search] Extracted {count} results from page for query: {message}")
+                logger.info(f"[search] extracted {count} results from page for query: {message}")
                 return count
 
         # If no count found, use conservative estimate
-        logger.warning(f"[Search] Could not extract count from page for query: {message}")
+        logger.warning(f"[search] could not extract count from page for query: {message}")
         return WEB_RESULTS_PER_PAGE
 
     except Exception as e:
-        logger.error(f"[Search] Failed to extract count from page: {e}")
+        logger.error(f"[search] failed to extract count from page: {e}")
         return WEB_RESULTS_PER_PAGE
 
 
@@ -632,7 +632,7 @@ def search_code(
             try:
                 callback(results, content)
             except Exception as e:
-                logger.error(f"[Search] Callback failed: {e}")
+                logger.error(f"[search] callback failed: {e}")
 
         return results, content
     except:

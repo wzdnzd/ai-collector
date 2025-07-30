@@ -226,6 +226,12 @@ class ConfigParser:
             for task_data in data["tasks"]:
                 config.tasks.append(self._parse_task(task_data))
 
+        # Check the rate limit settings for each task and correct any errors if any
+        max_workers = max(config.pipeline.threads.values())
+        for task in config.tasks:
+            if task.rate_limit and task.rate_limit.rate < max_workers:
+                task.rate_limit.rate = max_workers * 2
+
         return config
 
     def _parse_task(self, task_data: Dict[str, Any]) -> TaskConfig:
@@ -271,8 +277,8 @@ class ConfigParser:
         if "rate_limit" in task_data:
             limit_data = task_data["rate_limit"]
             task.rate_limit = RateLimit(
-                rate=limit_data.get("rate", 1.0),
-                burst=limit_data.get("burst", 5),
+                rate=max(limit_data.get("rate", 1.0), 0),
+                burst=max(limit_data.get("burst", 5), 0),
                 adaptive=limit_data.get("adaptive", True),
             )
 
