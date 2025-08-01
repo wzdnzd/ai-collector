@@ -43,6 +43,6 @@ class DoubaoProvider(OpenAILikeProvider):
         """Check Doubao token validity."""
         model = trim(model)
         if not model:
-            return CheckResult.fail(ErrorReason.INVALID_KEY)
+            model = self.default_model
 
         return super().check(token=token, address=address, endpoint=endpoint, model=model)
