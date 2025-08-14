@@ -1,0 +1,3 @@
+[submodule "harvester"]
+	path = harvester
+	url = git@github.com:wzdnzd/harvester.git
