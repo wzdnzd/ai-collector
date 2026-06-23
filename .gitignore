@@ -135,3 +135,4 @@ local.json
 /cmd/histories.cmd
 cmd/*.txt
 cmd/*.json
+/logs
